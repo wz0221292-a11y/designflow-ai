@@ -275,6 +275,7 @@ export function clearPromptTaskExecutor() {
   promptExecutor = null;
   flushPromptResult = null;
   startImageAfterPrompt = null;
+  inflightPromptRuns.clear();
 }
 
 const inflightPromptRuns = new Map<string, Promise<void>>();
