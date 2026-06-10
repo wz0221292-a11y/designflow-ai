@@ -130,8 +130,15 @@ export function upsertLocalRegenJob(job: FrameRegenJob) {
   const key = jobKey(job.projectId, job.slotIndex);
   const existing = snapshot.jobs[key];
 
-  // 终态不能被回退
-  if (existing && TERMINAL_STATUSES.has(existing.status) && ACTIVE_STATUSES.has(job.status)) {
+  // 只禁止同一代任务从 terminal 回退到 active。
+  // 新一代 generationId 必须允许覆盖旧 completed/failed，否则点击无反应。
+  const isSameGeneration = existing && existing.generationId === job.generationId;
+  if (
+    existing &&
+    isSameGeneration &&
+    TERMINAL_STATUSES.has(existing.status) &&
+    ACTIVE_STATUSES.has(job.status)
+  ) {
     return;
   }
 
@@ -155,18 +162,23 @@ export function reconcileServerRegenJobs(serverJobs: FrameRegenJob[]) {
     const key = jobKey(serverJob.projectId, serverJob.slotIndex);
     const local = snapshot.jobs[key];
 
+    // 如果本地已经是更新一代 active job，忽略旧 generation 的服务端结果
+    if (
+      local &&
+      local.generationId !== serverJob.generationId &&
+      ACTIVE_STATUSES.has(local.status)
+    ) {
+      continue;
+    }
+
     // 服务端终态 → 覆盖本地
     if (TERMINAL_STATUSES.has(serverJob.status)) {
-      snapshot.jobs[key] = {
-        ...local,
-        ...serverJob,
-        updatedAt: now,
-      };
+      snapshot.jobs[key] = { ...local, ...serverJob, updatedAt: now };
       changed = true;
       continue;
     }
 
-    // 服务端 active：如果本地没有，补充；如果本地有终态，不覆盖
+    // 服务端 active：如果本地没有，补充
     if (!local) {
       snapshot.jobs[key] = { ...serverJob, updatedAt: now };
       changed = true;
@@ -175,7 +187,11 @@ export function reconcileServerRegenJobs(serverJobs: FrameRegenJob[]) {
       snapshot.jobs[key] = { ...local, ...serverJob, updatedAt: now };
       changed = true;
     }
-    // 本地终态 + 远端 active → 忽略远端（本地更可信）
+    // 本地旧 terminal，服务端新 active（不同 generation）→ 允许新 gen 覆盖
+    else if (local.generationId !== serverJob.generationId && ACTIVE_STATUSES.has(serverJob.status)) {
+      snapshot.jobs[key] = { ...serverJob, updatedAt: now };
+      changed = true;
+    }
   }
 
   if (changed) {
@@ -186,14 +202,20 @@ export function reconcileServerRegenJobs(serverJobs: FrameRegenJob[]) {
 
 // ── 完成/失败后清理 ──
 
-export function removeLocalRegenJob(projectId: string, slotIndex: number) {
+export function removeLocalRegenJob(
+  projectId: string,
+  slotIndex: number,
+  generationId?: string,
+) {
   const snapshot = readStore();
   const key = jobKey(projectId, slotIndex);
-  if (snapshot.jobs[key]) {
-    delete snapshot.jobs[key];
-    writeStore(snapshot);
-    notify(snapshot.jobs);
-  }
+  const existing = snapshot.jobs[key];
+  if (!existing) return;
+  // 只清理指定 generation 的 job，避免误删新一轮任务
+  if (generationId && existing.generationId !== generationId) return;
+  delete snapshot.jobs[key];
+  writeStore(snapshot);
+  notify(snapshot.jobs);
 }
 
 // ── 查询 ──

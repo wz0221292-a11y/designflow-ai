@@ -327,7 +327,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
             // 先刷新项目（文字+图片一起出现），再清本地镜像
             syncFromStore();
             onGenerated?.();
-            removeLocalRegenJob(projectId, j.slot_index);
+            removeLocalRegenJob(projectId, j.slot_index, j.generation_id);
           }
         }
       } catch { /* transient */ }
