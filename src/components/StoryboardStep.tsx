@@ -180,7 +180,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         // 写帧 state —— 但必须校验版本号：只有当前帧的 _regenerationId 还匹配，才允许写回
         const regenerationId = task.clientRequestId;
         const currentFrame = normalizeImages(imagesRef.current, pid)[task.slotIndex];
-        if ((currentFrame as any)._regenerationId && (currentFrame as any)._regenerationId !== regenerationId) {
+        if (currentFrame.generationId && currentFrame.generationId !== regenerationId) {
           // 不是本轮重整的结果，丢弃
           return { description: '', prompt: '' };
         }
@@ -190,7 +190,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
             ...n[task.slotIndex],
             description,
             prompt,
-            _regenerationId: regenerationId,
+            generationId: regenerationId,
           };
           return n;
         });
@@ -204,7 +204,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         if (task.projectId !== pid) return;
         // 校验版本号：不是本轮重整的结果，不写入 DB
         const currentFrame = normalizeImages(imagesRef.current, pid)[task.slotIndex];
-        if ((currentFrame as any)._regenerationId && (currentFrame as any)._regenerationId !== task.clientRequestId) return;
+        if (currentFrame.generationId && currentFrame.generationId !== task.clientRequestId) return;
         if (!result.description && !result.prompt) return; // 空结果（版本被淘汰）
         const res = await fetch(`/api/projects/${task.projectId}/image-slot`, {
           method: 'PATCH',
@@ -227,7 +227,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         if (task.projectId !== pid) return;
         // 校验版本号
         const currentSlot = normalizeImages(imagesRef.current, pid)[task.slotIndex];
-        if ((currentSlot as any)._regenerationId && (currentSlot as any)._regenerationId !== task.clientRequestId) return;
+        if (currentSlot.generationId && currentSlot.generationId !== task.clientRequestId) return;
         if (!result.prompt) return; // 空结果（版本被淘汰）
         const imageClientRequestId = deriveImageClientRequestId(task.clientRequestId);
         const { data: { user } } = await supabase.auth.getUser();
@@ -419,7 +419,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     const regenerationId = task.clientRequestId;
     // 把 _regenerationId 写进 imagesRef（不触发 onUpdate → 不加入自动保存队列，防止刷新时空文本落库）
     const cur = normalizeImages(imagesRef.current, projectId);
-    cur[idx] = { ...cur[idx], description: '', prompt: '', _regenerationId: regenerationId };
+    cur[idx] = { ...cur[idx], description: '', prompt: '', generationId: regenerationId };
     imagesRef.current = cur;
     // 标记 UI 状态
     setSlotsWithPendingText(prev => new Set(prev).add(idx));
