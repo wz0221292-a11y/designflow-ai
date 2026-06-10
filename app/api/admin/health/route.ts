@@ -69,16 +69,37 @@ export async function GET() {
       const name = (p.product_intro as any)?.name || p.idea || '未命名';
       const assets: AssetInfo[] = [];
 
-      ((p.appearance_images as string[]) || []).forEach((url, i) => {
-        if (url) assets.push({ type: 'appearance', typeLabel: '外观', slot: i, url, isThirdParty: url.includes('65535.space') && !url.includes('supabase') });
+      // appearance_images 现在是 AppearanceImage[] 对象（兼容旧 string[] 数据）
+      const appImages = (p.appearance_images as any[]) || [];
+      appImages.forEach((item: any, i: number) => {
+        const url = typeof item === 'string' ? item : item?.url;
+        if (url) {
+          assets.push({
+            type: 'appearance',
+            typeLabel: '外观',
+            slot: i,
+            url,
+            isThirdParty: url.includes('65535.space') && !url.includes('supabase'),
+          });
+        }
       });
 
       ((p.storyboard_images as any[]) || []).forEach((s: any, i: number) => {
         if (s?.url) assets.push({ type: 'storyboard', typeLabel: '故事板', slot: i, url: s.url, isThirdParty: s.url.includes('65535.space') && !s.url.includes('supabase') });
       });
 
-      if (p.exploded_view_image) {
-        assets.push({ type: 'exploded_view', typeLabel: '爆炸图', slot: 0, url: p.exploded_view_image, isThirdParty: p.exploded_view_image.includes('65535.space') && !p.exploded_view_image.includes('supabase') });
+      // exploded_view_image 现在是 ExplodedViewImage 对象（兼容旧 string 数据）
+      const explodedUrl = typeof p.exploded_view_image === 'string'
+        ? p.exploded_view_image
+        : (p.exploded_view_image as any)?.url;
+      if (explodedUrl) {
+        assets.push({
+          type: 'exploded_view',
+          typeLabel: '爆炸图',
+          slot: 0,
+          url: explodedUrl,
+          isThirdParty: explodedUrl.includes('65535.space') && !explodedUrl.includes('supabase'),
+        });
       }
 
       if (!assets.length) continue;
@@ -190,8 +211,17 @@ export async function POST(request: NextRequest) {
 
     if (project) {
       if (type === 'appearance') {
-        const images = Array.from({ length: 3 }, (_, i) => (project.appearance_images as string[])?.[i] || '');
-        images[slotIndex] = saved.publicUrl;
+        // 兼容旧 string[] 和新 AppearanceImage[]
+        const raw = (project.appearance_images as any[]) || [];
+        const images: any[] = [];
+        for (let i = 0; i < 3; i++) {
+          const item = raw[i];
+          const existing = typeof item === 'string' ? { url: item } : (item || {});
+          images.push(i === slotIndex
+            ? { ...existing, url: saved.publicUrl, storagePath: saved.storagePath, projectId, stepKey: 'appearance', slotIndex: i }
+            : existing
+          );
+        }
         await supabaseAdmin.from('projects').update({ appearance_images: images }).eq('id', projectId);
       } else if (type === 'storyboard') {
         const images = ((project.storyboard_images as any[]) || []).slice(0, 6);
@@ -199,7 +229,19 @@ export async function POST(request: NextRequest) {
         images[slotIndex] = { ...images[slotIndex], url: saved.publicUrl, storagePath: saved.storagePath };
         await supabaseAdmin.from('projects').update({ storyboard_images: images }).eq('id', projectId);
       } else if (type === 'exploded_view') {
-        await supabaseAdmin.from('projects').update({ exploded_view_image: saved.publicUrl }).eq('id', projectId);
+        const existing = (typeof project.exploded_view_image === 'string'
+          ? { url: project.exploded_view_image }
+          : (project.exploded_view_image as any) || {});
+        await supabaseAdmin.from('projects').update({
+          exploded_view_image: {
+            ...existing,
+            url: saved.publicUrl,
+            storagePath: saved.storagePath,
+            projectId,
+            stepKey: 'exploded_view',
+            slotIndex: 0,
+          },
+        }).eq('id', projectId);
       }
     }
 
