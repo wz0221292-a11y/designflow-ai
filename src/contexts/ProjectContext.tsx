@@ -480,7 +480,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         }
 
         if (step === 5) {
-          const referenceImage = options.referenceImage || currentProject.appearance_images?.[0] || null;
+          const referenceImage = options.referenceImage || currentProject.appearance_images?.[0]?.url || null;
           // 保留已有的故事板，只生成空白槽位
           const existingImages = currentProject.storyboard_images || [];
           const storyboardImages = [...existingImages];
@@ -543,7 +543,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         }
 
         try {
-          const referenceImage = options.referenceImage || currentProject.appearance_images?.[0] || null;
+          const referenceImage = options.referenceImage || currentProject.appearance_images?.[0]?.url || null;
           const imageResponse = await fetch('/api/image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
