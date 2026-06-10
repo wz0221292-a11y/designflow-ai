@@ -19,6 +19,13 @@ import {
 import { startImageGeneration } from '@/lib/imageTaskStore';
 import { resolveImageUrl } from '@/lib/image/urlResolver';
 import { normalizeStoryboardImages, safeFrameForProject } from '@/lib/storyboard';
+import {
+  initializeFrameRegenStore,
+  subscribeFrameRegen,
+  upsertLocalRegenJob,
+  reconcileServerRegenJobs,
+  removeLocalRegenJob,
+} from '@/lib/frameRegenStore';
 import StepHeader, { stepSubCardClass } from './StepHeader';
 
 interface StoryboardStepProps {
@@ -162,9 +169,26 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   const [aiFramePrompts, setAiFramePrompts] = useState<string[]>([]);
   const imagesRef = useRef<StoryboardImage[]>(normalizeImages(images, projectId));
 
-  // ── 服务端 frame regeneration jobs（唯一流程真相源）──
-  const [regenJobs, setRegenJobs] = useState<Record<number, any>>({});
+  // ── 服务端 frame regeneration jobs（唯一流程真相源 + 本地镜像）──
+  const [regenJobs, setRegenJobs] = useState<Record<number, any>>(() => {
+    if (typeof window === 'undefined') return {};
+    const all = initializeFrameRegenStore(projectId);
+    const bySlot: Record<number, any> = {};
+    for (const job of Object.values(all)) bySlot[job.slotIndex] = job;
+    return bySlot;
+  });
   const regenJobsRef = useRef<Record<number, any>>({});
+
+  // 订阅跨组件/store变更
+  useEffect(() => {
+    return subscribeFrameRegen((all) => {
+      const bySlot: Record<number, any> = {};
+      for (const job of Object.values(all)) {
+        if (job.projectId === projectId) bySlot[job.slotIndex] = job;
+      }
+      setRegenJobs(bySlot);
+    });
+  }, [projectId]);
 
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
 
@@ -274,7 +298,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     for (const task of tasks) void ensurePromptTaskRunning(task);
   }, [projectId, promptTasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── 轮询服务端 frame regeneration jobs ──
+  // ── 轮询服务端 frame regeneration jobs + reconcile 本地镜像 ──
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -285,29 +309,33 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         const res = await fetch(`/api/frame-regeneration?projectId=${encodeURIComponent(projectId)}`);
         if (!res.ok || cancelled) return;
         const data = await res.json();
-        const jobs: Record<number, any> = {};
-        let hasActive = false;
-        const activeSlotSet = new Set<number>();
-        for (const j of data.jobs || []) {
-          jobs[j.slot_index] = j;
-          if (j.status !== 'completed' && j.status !== 'failed') {
-            hasActive = true;
-            activeSlotSet.add(j.slot_index);
-          }
-        }
-        setRegenJobs(jobs);
 
-        // 新完成的 job → 刷新项目数据（文字+图片一起出现）
+        // reconcile 到本地 store（store 内部 notify → React state 自动更新）
+        reconcileServerRegenJobs((data.jobs || []).map((j: any) => ({
+          jobId: j.id,
+          projectId: j.project_id || projectId,
+          slotIndex: j.slot_index,
+          generationId: j.generation_id || '',
+          status: j.status,
+          updatedAt: Date.now(),
+        })));
+
+        // 新完成的 job → 刷新项目数据（文字+图片一起出现）+ 清理本地镜像
         for (const j of data.jobs || []) {
           if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
+            removeLocalRegenJob(projectId, j.slot_index);
             syncFromStore();
             onGenerated?.();
           }
         }
-
-        regenJobsRef.current = jobs;
-        if (hasActive) timer = setTimeout(poll, 2000);
       } catch { /* transient */ }
+
+      // 检查是否还有活跃 job → 继续轮询
+      const all = initializeFrameRegenStore(projectId);
+      const hasActive = Object.values(all).some(
+        (j: any) => j.status !== 'completed' && j.status !== 'failed',
+      );
+      if (!cancelled && hasActive) timer = setTimeout(poll, 2000);
     };
 
     poll();
@@ -469,11 +497,14 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
     const generationId = `regen-${projectId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // 乐观更新
-    setRegenJobs(prev => ({
-      ...prev,
-      [idx]: { slot_index: idx, status: 'queued', generation_id: generationId },
-    }));
+    // 乐观写入本地镜像 → UI 零延迟显示状态
+    upsertLocalRegenJob({
+      projectId,
+      slotIndex: idx,
+      generationId,
+      status: 'queued',
+      updatedAt: Date.now(),
+    });
 
     try {
       const res = await fetch('/api/frame-regeneration', {
@@ -496,7 +527,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       // 否则等轮询
     } catch (e: any) {
       setLastError(e.message || '重生成失败');
-      setRegenJobs(prev => { const next = { ...prev }; delete next[idx]; return next; });
+      removeLocalRegenJob(projectId, idx);
     }
   };
 
