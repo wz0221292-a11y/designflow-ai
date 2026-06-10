@@ -1,22 +1,25 @@
 'use client';
 
 import { useEffect, useState, useRef, useCallback } from 'react';
+import type { ExplodedViewImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
+import { safeExplodedViewForProject } from '@/lib/normalize';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface ExplodedViewStepProps {
-  image: string | null;
+  image: ExplodedViewImage | null;
   isLoading: boolean;
   idea: string;
   projectId: string;
   referenceImage?: string | null;
-  onUpdate: (image: string) => void;
+  onUpdate: (image: ExplodedViewImage) => void;
   onGeneratingChange?: (generating: boolean) => void;
   onGenerated?: () => void;
 }
 
 export default function ExplodedViewStep({ image, isLoading, idea, projectId, referenceImage, onUpdate, onGeneratingChange, onGenerated }: ExplodedViewStepProps) {
+  const safeImage = safeExplodedViewForProject(image, projectId) || null;
   const [annotations, setAnnotations] = useState<string[]>(['', '', '', '', '']);
   const [lastError, setLastError] = useState<string | null>(null);
 
@@ -33,8 +36,14 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
     const key = completedImages[0];
     if (key === lastCompletedRef.current) return;
     lastCompletedRef.current = key;
-    onUpdate(completedImages[0]);
-  }, [completedImages, onUpdate]);
+    onUpdate({
+      projectId,
+      stepKey: 'exploded_view' as const,
+      slotIndex: 0,
+      url: completedImages[0],
+      status: 'ready',
+    });
+  }, [completedImages, onUpdate, projectId]);
 
   const generateImage = async () => {
     if (isGenerating) return;
@@ -42,6 +51,7 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
     const pid = projectId;
     try {
       const { data: { user } } = await supabase.auth.getUser();
+      const prevUrl = safeImage?.url || undefined;
       const result = await startGeneration({
         slotIndex: 0,
         prompt: [
@@ -57,11 +67,20 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
           `No text labels, no watermarks, no UI overlays — purely visual technical breakdown`,
         ].join(', '),
         referenceImage: referenceImage || undefined,
-        previousImageUrl: image || undefined,
+        previousImageUrl: prevUrl,
         userId: user?.id,
       });
       syncFromStore();
-      if (result.imageUrl && projectId === pid) onUpdate(result.imageUrl);
+      if (result.imageUrl && projectId === pid) {
+        onUpdate({
+          projectId,
+          stepKey: 'exploded_view' as const,
+          slotIndex: 0,
+          url: result.imageUrl,
+          storagePath: result.storagePath,
+          status: 'ready',
+        });
+      }
     } catch (error: any) {
       if (projectId !== pid) return;
       setLastError(error.message || '生成失败，请重试');
@@ -91,7 +110,7 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
           <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" /></svg>
         }
         action={
-          image ? (
+          safeImage?.url ? (
             <button onClick={generateImage} disabled={isGenerating} className={stepSecondaryButtonClass}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
               {isGenerating ? '重新生成中…' : '重新生成'}
@@ -123,9 +142,9 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Image area */}
         <div className="lg:col-span-3">
-          {image ? (
+          {safeImage?.url ? (
             <div className="group relative overflow-hidden rounded-[1.75rem] border bg-white shadow-lg shadow-rose-100/20">
-              <img src={image} alt="爆炸图" className={`w-full object-cover transition duration-500 ${isGenerating ? 'blur-[2px] scale-105' : ''}`} />
+              <img src={safeImage.url} alt="爆炸图" className={`w-full object-cover transition duration-500 ${isGenerating ? 'blur-[2px] scale-105' : ''}`} />
               {/* 生成中遮罩 */}
               {isGenerating && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-rose-500/20 via-rose-400/10 to-orange-500/20 backdrop-blur-[1px]">

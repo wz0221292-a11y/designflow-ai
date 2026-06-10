@@ -265,7 +265,7 @@ export async function POST(request: NextRequest) {
           existingImages[slotIndex] = finalUrl;
           await supabase.from('projects').update({ appearance_images: existingImages }).eq('id', projectId).eq('user_id', user.id);
         } else if (type === 'storyboard') {
-          const storyImages = normalizeStoryboardImages(currentProject.storyboard_images);
+          const storyImages = normalizeStoryboardImages(currentProject.storyboard_images, projectId);
           storyImages[slotIndex] = { ...storyImages[slotIndex], url: finalUrl, storagePath: saved.storagePath };
           await supabase.from('projects').update({ storyboard_images: storyImages }).eq('id', projectId).eq('user_id', user.id);
         } else if (type === 'exploded_view') {

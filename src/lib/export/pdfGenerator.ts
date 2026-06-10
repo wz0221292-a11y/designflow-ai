@@ -11,7 +11,7 @@ const MAX_TOTAL_IMAGE_BYTES = 40 * 1024 * 1024; // 40 MB total
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const IMAGE_FETCH_TIMEOUT = 5000; // 5 seconds per image
 
-type ProjectRow = Database['public']['Tables']['projects']['Row'];
+type ProjectRow = import('@/types').Project;
 
 const imageCache = new Map<string, string>();
 let totalImageBytes = 0;
@@ -484,8 +484,10 @@ export async function generatePDF(
   const intro = project.product_intro as any;
   const personas = ((project.personas as any[]) || []).filter(Boolean);
   const cmf = project.cmf as any;
-  const appearanceImages = ((project.appearance_images as string[]) || []).filter(Boolean);
+  const appearanceImages = ((project.appearance_images as any[]) || []).filter((i: any) => i?.url);
   const storyboardImages = ((project.storyboard_images as any[]) || []).filter((i: any) => i?.url);
+
+  const appearanceUrls: string[] = appearanceImages.map((i: any) => i.url || i).filter(Boolean);
   const title = t(intro?.name) || t(project.idea) || '设计方案';
   const tagline = t(intro?.tagline) || 'AI 产品设计方案';
 
@@ -507,7 +509,7 @@ export async function generatePDF(
   if (include.appearance && appearanceImages.length) sections.push({ num: '04', name: '外观设计' });
   if (include.cmf && cmf) sections.push({ num: '05', name: 'CMF 方案' });
   if (include.storyboard && storyboardImages.length) sections.push({ num: '06', name: '故事板' });
-  if (include.exploded_view && project.exploded_view_image) sections.push({ num: '07', name: '爆炸图' });
+  if (include.exploded_view && project.exploded_view_image?.url) sections.push({ num: '07', name: '爆炸图' });
 
   const content: Content = [
     buildCover(title, tagline),
@@ -562,7 +564,7 @@ export async function generatePDF(
     content.push({
       stack: [
         ...sectionBlock('外观设计', '产品效果图与形态探索'),
-        imageGrid(appearanceImages, '效果图'),
+        imageGrid(appearanceUrls, '效果图'),
       ].filter(Boolean),
       pageBreak: 'before',
     });
@@ -588,11 +590,11 @@ export async function generatePDF(
   }
 
   // 7. Exploded view
-  if (include.exploded_view && project.exploded_view_image) {
+  if (include.exploded_view && project.exploded_view_image?.url) {
     content.push({
       stack: [
         ...sectionBlock('爆炸图', '产品结构分解视图'),
-        heroImage(project.exploded_view_image),
+        heroImage(project.exploded_view_image?.url || ''),
       ],
       pageBreak: 'before',
     });
@@ -655,9 +657,9 @@ export async function generatePDF(
   const imgMap: Record<string, string> = {};
 
   const urlsToFetch = [
-    ...appearanceImages,
+    ...appearanceUrls,
     ...storyboardImages.map((img: any) => img.url),
-    project.exploded_view_image,
+    project.exploded_view_image?.url || '',
   ].filter((u): u is string => Boolean(u));
 
   await Promise.all(

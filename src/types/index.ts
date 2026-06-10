@@ -16,10 +16,12 @@ export interface Project {
   background: string | null;
   product_intro: ProductIntro | null;
   personas: Persona[] | null;
-  appearance_images: string[] | null;
+  /** 外观设计图片 —— 每项为 AppearanceImage 对象（旧数据 string 会在 normalize 时转换） */
+  appearance_images: AppearanceImage[] | null;
   cmf: CMF | null;
   storyboard_images: StoryboardImage[] | null;
-  exploded_view_image: string | null;
+  /** 爆炸图 —— ExplodedViewImage 对象（旧数据 string 会在 normalize 时转换） */
+  exploded_view_image: ExplodedViewImage | null;
   current_step: number;
   selected_appearance_index: number | null;
   created_at: string;
@@ -54,14 +56,36 @@ export interface CMF {
   surface_treatment: string;
 }
 
-export interface StoryboardImage {
+/** 项目内资源统一身份字段 —— 防串台核心 */
+export interface ProjectBoundFields {
+  projectId: string;
+  stepKey: 'appearance' | 'storyboard' | 'exploded_view';
+  slotIndex: number;
+  /** 防竞态版本标记：同一槽位多次生成时，只有最新 generationId 的结果能写回 */
+  generationId?: string;
+}
+
+export interface StoryboardImage extends ProjectBoundFields {
   url: string;
   description: string;
   prompt?: string;
   /** Supabase Storage 对象路径，用于 URL 失效后重建访问地址 */
   storagePath?: string;
-  /** 内部版本标记，用于重整故事时防竞态 */
+  status?: 'idle' | 'text_generating' | 'image_generating' | 'ready' | 'failed';
+  /** @deprecated 迁移到 generationId，保留用于读取旧数据 */
   _regenerationId?: string;
+}
+
+export interface AppearanceImage extends ProjectBoundFields {
+  url: string;
+  storagePath?: string;
+  status?: 'generating' | 'ready' | 'failed';
+}
+
+export interface ExplodedViewImage extends ProjectBoundFields {
+  url: string;
+  storagePath?: string;
+  status?: 'generating' | 'ready' | 'failed';
 }
 
 export interface Announcement {

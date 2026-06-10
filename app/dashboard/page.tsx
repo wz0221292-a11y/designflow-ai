@@ -28,7 +28,7 @@ function getProjectProgress(project: Project) {
     project.background,
     project.product_intro,
     project.personas?.length,
-    project.appearance_images?.some(Boolean),
+    project.appearance_images?.some(img => img?.url),
     project.cmf,
     project.storyboard_images?.some((item) => item.url),
     project.exploded_view_image,
@@ -37,7 +37,7 @@ function getProjectProgress(project: Project) {
 }
 
 function getProjectCover(project: Project) {
-  return project.appearance_images?.find(Boolean) || project.exploded_view_image || project.storyboard_images?.find((item) => item.url)?.url || null;
+  return project.appearance_images?.find(img => img?.url)?.url || project.exploded_view_image?.url || project.storyboard_images?.find((item) => item.url)?.url || null;
 }
 
 export default function DashboardPage() {

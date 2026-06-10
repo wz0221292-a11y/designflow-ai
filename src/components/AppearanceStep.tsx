@@ -1,16 +1,18 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import type { AppearanceImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
+import { safeAppearanceForProject } from '@/lib/normalize';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface AppearanceStepProps {
-  images: string[] | null;
+  images: AppearanceImage[] | null;
   isLoading: boolean;
   idea: string;
   projectId: string;
-  onUpdate: (images: string[]) => void;
+  onUpdate: (images: AppearanceImage[]) => void;
   onSelectionChange?: (index: number) => void;
   onGeneratingChange?: (generating: boolean) => void;
   selectedIndex?: number | null;
@@ -34,8 +36,14 @@ const appearanceVariations = (idea: string) => [
   `Detail and material study of ${idea}: pure white background, close-up macro angle focusing on surface textures, material junctions, and craftsmanship details, strong side lighting to reveal contours and finishes, minimal composition with negative space, ${appearanceQualityConstraints}, photorealistic`,
 ];
 
+function createEmptyAppearanceSlot(projectId: string, slotIndex: number): AppearanceImage {
+  return { projectId, stepKey: 'appearance', slotIndex, url: '' };
+}
+
 export default function AppearanceStep({ images, isLoading, idea, projectId, onUpdate, onSelectionChange, onGeneratingChange, selectedIndex, onGenerated }: AppearanceStepProps) {
-  const currentImages = Array.isArray(images) ? images : ['', '', ''];
+  const safeImages = (Array.isArray(images) ? images : []).map((img, i) => safeAppearanceForProject(img, projectId) || createEmptyAppearanceSlot(projectId, i));
+  while (safeImages.length < 3) safeImages.push(createEmptyAppearanceSlot(projectId, safeImages.length));
+  const currentImages = safeImages.slice(0, 3);
   const imagesRef = useRef(currentImages);
   const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(selectedIndex != null ? selectedIndex : null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -57,14 +65,16 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
     if (key === lastCompletedRef.current) return;
     lastCompletedRef.current = key;
     const newImages = [...imagesRef.current];
-    while (newImages.length < 3) newImages.push('');
+    while (newImages.length < 3) newImages.push(createEmptyAppearanceSlot(projectId, newImages.length));
     for (const [idxStr, url] of urls) {
       const idx = Number(idxStr);
-      if (idx >= 0 && idx < 3) newImages[idx] = url;
+      if (idx >= 0 && idx < 3) {
+        newImages[idx] = { ...newImages[idx], url, status: 'ready' as const };
+      }
     }
     imagesRef.current = newImages;
     onUpdate(newImages);
-  }, [completedImages, onUpdate]);
+  }, [completedImages, onUpdate, projectId]);
 
   useEffect(() => { onGeneratingChange?.(Object.values(generatingSlots).some(Boolean)); }, [generatingSlots, onGeneratingChange]);
 
@@ -75,17 +85,25 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const prompt = appearanceVariations(idea)[index] || appearanceVariations(idea)[0];
+      const prevUrl = imagesRef.current[index]?.url || undefined;
       const result = await startGeneration({
         slotIndex: index,
         prompt,
-        previousImageUrl: currentImages[index] || undefined,
+        previousImageUrl: prevUrl,
         userId: user?.id,
       });
       if (result.imageUrl && projectId === pid) {
         syncFromStore();
         const newImages = [...imagesRef.current];
-        while (newImages.length < 3) newImages.push('');
-        newImages[index] = result.imageUrl;
+        while (newImages.length < 3) newImages.push(createEmptyAppearanceSlot(projectId, newImages.length));
+        newImages[index] = {
+          projectId,
+          stepKey: 'appearance' as const,
+          slotIndex: index,
+          url: result.imageUrl,
+          storagePath: result.storagePath,
+          status: 'ready',
+        };
         imagesRef.current = newImages;
         onUpdate(newImages);
       } else if (result.imageUrl) {
@@ -121,7 +139,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
     );
   }
 
-  const allGenerated = currentImages.every(Boolean);
+  const allGenerated = currentImages.every(img => img?.url);
   const isAnyGenerating = Object.values(generatingSlots).some(Boolean);
 
   return (
@@ -200,7 +218,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
               {/* Card header */}
               <div className="flex items-center justify-between border-b border-slate-200/80 px-4 py-3">
                 <div className="flex items-center gap-2">
-                  <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${isThisSlotGenerating ? 'bg-cyan-100 text-cyan-600' : img ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>
+                  <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${isThisSlotGenerating ? 'bg-cyan-100 text-cyan-600' : img?.url ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>
                     {index + 1}
                   </span>
                   <span className={`text-sm font-bold ${isThisSlotGenerating ? 'text-cyan-600' : 'text-slate-700'}`}>效果图 {index + 1}</span>
@@ -218,9 +236,9 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
               </div>
 
               {/* Image area */}
-              {img ? (
-                <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => !isThisSlotGenerating && setPreviewImage(img)}>
-                  <img src={img} alt={`外观设计 ${index + 1}`} className={`h-full w-full object-cover transition duration-500 ${isThisSlotGenerating ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`} />
+              {img?.url ? (
+                <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => !isThisSlotGenerating && setPreviewImage(img.url)}>
+                  <img src={img.url} alt={`外观设计 ${index + 1}`} className={`h-full w-full object-cover transition duration-500 ${isThisSlotGenerating ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`} />
                   {/* 生成中遮罩 */}
                   {isThisSlotGenerating && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-cyan-500/20 via-cyan-400/10 to-blue-500/20 backdrop-blur-[1px]">
@@ -280,7 +298,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
 
               {/* Card footer */}
               <div className="flex items-center gap-2 border-t border-slate-200/80 px-4 py-3">
-                {img ? (
+                {img?.url ? (
                   <>
                     <button onClick={() => handleSelect(index)} disabled={selectedImageIndex !== null || isAnyGenerating}
                       className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-2.5 text-sm font-bold transition-all ${
@@ -316,7 +334,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
       {/* Generate all CTA */}
       {!allGenerated && !isAnyGenerating && selectedImageIndex === null && (
         <div className="mt-8 flex justify-center">
-          <button onClick={() => { imagesRef.current.forEach((img, index) => { if (!img && !generatingSlots[index]) generateImage(index); }); }}
+          <button onClick={() => { imagesRef.current.forEach((img, index) => { if (!img?.url && !generatingSlots[index]) generateImage(index); }); }}
             className="inline-flex items-center gap-2.5 rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 px-8 py-3.5 text-sm font-black text-white shadow-xl shadow-cyan-500/25 outline-none transition hover:-translate-y-0.5 hover:shadow-2xl hover:shadow-cyan-500/30 active:translate-y-0">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             一键生成全部效果图

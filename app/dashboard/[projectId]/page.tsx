@@ -48,13 +48,13 @@ export default function ProjectPage() {
   const effectiveImageGenerating = isImageGenerating;
 
   // Selection is DB-driven: derive URL from index
-  const appearanceImages = (state.project?.appearance_images as string[]) || [];
+  const appearanceImages = state.project?.appearance_images || [];
   const selectedAppearanceIndex = state.project?.selected_appearance_index ?? null;
   const selectedAppearance =
     typeof selectedAppearanceIndex === 'number' &&
     selectedAppearanceIndex >= 0 &&
     selectedAppearanceIndex < appearanceImages.length
-      ? appearanceImages[selectedAppearanceIndex] ?? null
+      ? appearanceImages[selectedAppearanceIndex]?.url ?? null
       : null;
 
   // Save selection index to DB immediately
@@ -107,14 +107,14 @@ export default function ProjectPage() {
   const handleNextStep = async () => {
     // 图片步骤必须至少生成一张图才能继续
     if (state.currentStep === 3) {
-      if (!state.project?.appearance_images?.some(Boolean)) return;
-      if (state.project?.appearance_images?.some(Boolean) && !selectedAppearance) return;
+      if (!state.project?.appearance_images?.some(img => img?.url)) return;
+      if (state.project?.appearance_images?.some(img => img?.url) && !selectedAppearance) return;
     }
     if (state.currentStep === 5) {
-      if (!state.project?.storyboard_images?.some(img => img.url)) return;
+      if (!state.project?.storyboard_images?.some(img => img?.url)) return;
     }
     if (state.currentStep === 6) {
-      if (!state.project?.exploded_view_image) return;
+      if (!state.project?.exploded_view_image?.url) return;
     }
     await saveCurrentStep();
     // 先保存当前步骤，再导航到下一步，避免全局loading阻塞UI
@@ -383,18 +383,18 @@ export default function ProjectPage() {
             )}
             <button
               onClick={handleNextStep}
-              disabled={state.isLoading || state.isSaving || ([3, 5, 6].includes(state.currentStep) && effectiveImageGenerating) || (state.currentStep === 3 && (!state.project?.appearance_images?.some(Boolean) || (state.project?.appearance_images?.some(Boolean) && !selectedAppearance))) || (state.currentStep === 5 && !state.project?.storyboard_images?.some(img => img.url)) || (state.currentStep === 6 && !state.project?.exploded_view_image)}
+              disabled={state.isLoading || state.isSaving || ([3, 5, 6].includes(state.currentStep) && effectiveImageGenerating) || (state.currentStep === 3 && (!state.project?.appearance_images?.some(img => img?.url) || (state.project?.appearance_images?.some(img => img?.url) && !selectedAppearance))) || (state.currentStep === 5 && !state.project?.storyboard_images?.some(img => img?.url)) || (state.currentStep === 6 && !state.project?.exploded_view_image?.url)}
               className={`rounded-full px-7 py-3 font-bold outline-none transition hover:-translate-y-0.5 active:translate-y-0 focus-visible:ring-4 disabled:hover:translate-y-0 ${
                 state.isLoading || ([3, 5, 6].includes(state.currentStep) && effectiveImageGenerating)
                   ? 'bg-slate-300 text-white'
-                  : (state.currentStep === 3 && (!state.project?.appearance_images?.some(Boolean) || (state.project?.appearance_images?.some(Boolean) && !selectedAppearance))) || (state.currentStep === 5 && !state.project?.storyboard_images?.some(img => img.url)) || (state.currentStep === 6 && !state.project?.exploded_view_image)
+                  : (state.currentStep === 3 && (!state.project?.appearance_images?.some(img => img?.url) || (state.project?.appearance_images?.some(img => img?.url) && !selectedAppearance))) || (state.currentStep === 5 && !state.project?.storyboard_images?.some(img => img?.url)) || (state.currentStep === 6 && !state.project?.exploded_view_image?.url)
                   ? 'bg-slate-200 text-slate-400'
                   : 'bg-blue-600 text-white shadow-md shadow-blue-600/20 hover:bg-blue-700 focus-visible:ring-blue-200'
               }`}
             >
               {state.isLoading || ([3, 5, 6].includes(state.currentStep) && effectiveImageGenerating) ? '图片生成中…' : (
                 (() => {
-                  const isDisabled = (state.currentStep === 3 && (!state.project?.appearance_images?.some(Boolean) || (state.project?.appearance_images?.some(Boolean) && !selectedAppearance))) || (state.currentStep === 5 && !state.project?.storyboard_images?.some(img => img.url)) || (state.currentStep === 6 && !state.project?.exploded_view_image);
+                  const isDisabled = (state.currentStep === 3 && (!state.project?.appearance_images?.some(img => img?.url) || (state.project?.appearance_images?.some(img => img?.url) && !selectedAppearance))) || (state.currentStep === 5 && !state.project?.storyboard_images?.some(img => img?.url)) || (state.currentStep === 6 && !state.project?.exploded_view_image?.url);
                   if (isDisabled) {
                     return '请先生成图片';
                   }

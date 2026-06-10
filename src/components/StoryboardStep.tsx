@@ -18,7 +18,7 @@ import {
 } from '@/lib/promptTaskStore';
 import { startImageGeneration } from '@/lib/imageTaskStore';
 import { resolveImageUrl } from '@/lib/image/urlResolver';
-import { normalizeStoryboardImages } from '@/lib/storyboard';
+import { normalizeStoryboardImages, safeFrameForProject } from '@/lib/storyboard';
 import StepHeader, { stepSubCardClass } from './StepHeader';
 
 interface StoryboardStepProps {
@@ -146,8 +146,8 @@ const buildFallbackPrompt = (idea: string, frameIndex: number, desc: string): st
   ].join(' | ');
 };
 
-const normalizeImages = (images: StoryboardImage[] | null | undefined) =>
-  normalizeStoryboardImages(images);
+const normalizeImages = (images: StoryboardImage[] | null | undefined, projectId: string) =>
+  normalizeStoryboardImages(images, projectId);
 
 export default function StoryboardStep({ images, isLoading, idea, projectId, referenceImage, productIntro, selectedAppearanceIndex, onUpdate, onGeneratingChange, onGenerated, onFlushSave }: StoryboardStepProps) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -160,12 +160,12 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   });
 
   const [aiFramePrompts, setAiFramePrompts] = useState<string[]>([]);
-  const imagesRef = useRef<StoryboardImage[]>(normalizeImages(images));
+  const imagesRef = useRef<StoryboardImage[]>(normalizeImages(images, projectId));
 
   // 正在等新文案的槽位——该阶段不通过 onUpdate 触发自动保存，只标记 UI 状态
   const [slotsWithPendingText, setSlotsWithPendingText] = useState<Set<number>>(new Set());
 
-  useEffect(() => { imagesRef.current = normalizeImages(images); }, [images]);
+  useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
 
   const { generatingSlots, completedImages, startGeneration, syncFromStore } = useImageTaskStore({ projectId, step: 'storyboard' });
 
@@ -179,13 +179,13 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         const { description, prompt } = await generateFramePrompt(task.slotIndex);
         // 写帧 state —— 但必须校验版本号：只有当前帧的 _regenerationId 还匹配，才允许写回
         const regenerationId = task.clientRequestId;
-        const currentFrame = normalizeImages(imagesRef.current)[task.slotIndex];
+        const currentFrame = normalizeImages(imagesRef.current, pid)[task.slotIndex];
         if ((currentFrame as any)._regenerationId && (currentFrame as any)._regenerationId !== regenerationId) {
           // 不是本轮重整的结果，丢弃
           return { description: '', prompt: '' };
         }
         commitDescriptions(latest => {
-          const n = normalizeImages(latest);
+          const n = normalizeImages(latest, pid);
           n[task.slotIndex] = {
             ...n[task.slotIndex],
             description,
@@ -203,7 +203,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       async (task, result) => {
         if (task.projectId !== pid) return;
         // 校验版本号：不是本轮重整的结果，不写入 DB
-        const currentFrame = normalizeImages(imagesRef.current)[task.slotIndex];
+        const currentFrame = normalizeImages(imagesRef.current, pid)[task.slotIndex];
         if ((currentFrame as any)._regenerationId && (currentFrame as any)._regenerationId !== task.clientRequestId) return;
         if (!result.description && !result.prompt) return; // 空结果（版本被淘汰）
         const res = await fetch(`/api/projects/${task.projectId}/image-slot`, {
@@ -226,7 +226,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       async (task, result) => {
         if (task.projectId !== pid) return;
         // 校验版本号
-        const currentSlot = normalizeImages(imagesRef.current)[task.slotIndex];
+        const currentSlot = normalizeImages(imagesRef.current, pid)[task.slotIndex];
         if ((currentSlot as any)._regenerationId && (currentSlot as any)._regenerationId !== task.clientRequestId) return;
         if (!result.prompt) return; // 空结果（版本被淘汰）
         const imageClientRequestId = deriveImageClientRequestId(task.clientRequestId);
@@ -241,7 +241,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           userId: user?.id,
           clientRequestId: imageClientRequestId,
         });
-        const latestSlot = normalizeImages(imagesRef.current)[task.slotIndex];
+        const latestSlot = normalizeImages(imagesRef.current, projectId)[task.slotIndex];
         const patch = await fetch(`/api/projects/${task.projectId}/image-slot`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -306,11 +306,12 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     const key = JSON.stringify(urls);
     if (key === lastCompletedRef.current) return;
     lastCompletedRef.current = key;
-    const cur = normalizeImages(imagesRef.current);
+    const cur = normalizeImages(imagesRef.current, projectId);
     for (const [idxStr, url] of urls) {
       const idx = Number(idxStr);
       if (idx >= 0 && idx < 6) {
         cur[idx] = {
+          ...cur[idx],
           url,
           description: cur[idx]?.description || '',
           prompt: cur[idx]?.prompt || '',
@@ -324,8 +325,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   useEffect(() => { onGeneratingChange?.(Object.values(generatingSlots).some(Boolean)); }, [generatingSlots, onGeneratingChange]);
 
   const commitDescriptions = useCallback((updater: (imgs: StoryboardImage[]) => StoryboardImage[]) => {
-    const latest = normalizeImages(imagesRef.current);
-    const next = normalizeImages(updater(latest));
+    const latest = normalizeImages(imagesRef.current, projectId);
+    const next = normalizeImages(updater(latest), projectId);
     imagesRef.current = next;
     onUpdate(next);
   }, [onUpdate]);
@@ -362,7 +363,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       const prompts = d.frames.map((f: any) => buildBoundStoryboardPrompt(f.visualPrompt as string, f.description || f.sceneTitle));
       // 写入帧——forceOverwrite 时覆盖 description，初次保留用户编辑
       commitDescriptions(latest => {
-        const n = normalizeImages(latest);
+        const n = normalizeImages(latest, projectId);
         d.frames.forEach((f: any) => {
           const i = f.index;
           const description = f.description || f.sceneTitle;
@@ -389,7 +390,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
   // 首次进入故事板步骤时自动生成提示词
   useEffect(() => {
-    const cur = normalizeImages(images);
+    const cur = normalizeImages(images, projectId);
     const hasAnyPrompt = cur.some(img => img.prompt);
     if (!hasAnyPrompt && promptGenStatus === 'idle' && !isLoading) {
       generateAIPrompts();
@@ -417,7 +418,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     const task = startPromptTask(projectId, idx);
     const regenerationId = task.clientRequestId;
     // 把 _regenerationId 写进 imagesRef（不触发 onUpdate → 不加入自动保存队列，防止刷新时空文本落库）
-    const cur = normalizeImages(imagesRef.current);
+    const cur = normalizeImages(imagesRef.current, projectId);
     cur[idx] = { ...cur[idx], description: '', prompt: '', _regenerationId: regenerationId };
     imagesRef.current = cur;
     // 标记 UI 状态
@@ -432,7 +433,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     setLastError(null);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      const cur = normalizeImages(imagesRef.current);
+      const cur = normalizeImages(imagesRef.current, projectId);
       const desc = cur[idx]?.description || defaultPanelDescriptions[idx];
       const prompt = getFramePrompt(idx, desc);
       const result = await startGeneration({
@@ -444,7 +445,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       });
       syncFromStore();
       if (result.imageUrl) {
-        const n = normalizeImages(imagesRef.current);
+        const n = normalizeImages(imagesRef.current, projectId);
         n[idx] = { ...n[idx], url: result.imageUrl, description: n[idx]?.description || desc };
         imagesRef.current = n;
         onUpdate(n);
@@ -454,7 +455,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     }
   };
 
-  const handleDesc = (idx: number, val: string) => { commitDescriptions(latest => { const n = normalizeImages(latest); n[idx] = { ...n[idx], description: val }; return n; }); };
+  const handleDesc = (idx: number, val: string) => { commitDescriptions(latest => { const n = normalizeImages(latest, projectId); n[idx] = { ...n[idx], description: val }; return n; }); };
 
   const generateAll = async () => {
     const targets = Array.from({ length: 6 }, (_, i) => i).filter(i => !imagesRef.current[i]?.url && !generatingSlots[i]);
@@ -477,13 +478,16 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     );
   }
 
-  const _currentImages = normalizeImages(images);
+  const _currentImages = normalizeImages(images, projectId);
   // 合并 UI 状态：pending 文字槽位显示为已清空，不展示旧文案
+  // 同时过滤不属于当前项目的数据（防串台最终防线）
   const displayImages = _currentImages.map((img, idx) => {
+    const safe = safeFrameForProject(img, projectId);
+    const base = safe || normalizeImages([], projectId)[idx];
     if (slotsWithPendingText.has(idx)) {
-      return { ...img, description: '', prompt: '' };
+      return { ...base, description: '', prompt: '' };
     }
-    return img;
+    return base;
   });
   const currentImages = displayImages;
   const hasAnyImage = currentImages.some(img => img.url);

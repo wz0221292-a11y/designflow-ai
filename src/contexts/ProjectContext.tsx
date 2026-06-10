@@ -2,7 +2,9 @@
 
 import { createContext, useContext, useReducer, useCallback, useEffect, ReactNode, useRef } from 'react';
 import { supabase } from '@/lib/supabase/client';
-import type { Project, ProjectState, ProjectAction } from '@/types';
+import type { AppearanceImage, Project, ProjectState, ProjectAction } from '@/types';
+import { normalizeStoryboardImages } from '@/lib/storyboard';
+import { normalizeAppearanceImages, normalizeExplodedViewImage, assertProjectBoundData } from '@/lib/normalize';
 
 const initialState: ProjectState = {
   project: null,
@@ -41,6 +43,37 @@ function storeViewedStep(projectId: string, step: number) {
   window.localStorage.setItem(getViewedStepKey(projectId), String(step));
 }
 
+/** 合并 project 数据时自动规范化资源字段 */
+function normalizeMerge(current: Project, incoming: Partial<Project>): Project {
+  const pid = current.id;
+  const merged = { ...current, ...incoming };
+  if (incoming.storyboard_images !== undefined) {
+    merged.storyboard_images = normalizeStoryboardImages(incoming.storyboard_images, pid);
+  }
+  if (incoming.appearance_images !== undefined) {
+    merged.appearance_images = normalizeAppearanceImages(incoming.appearance_images, pid);
+  }
+  if (incoming.exploded_view_image !== undefined) {
+    merged.exploded_view_image = normalizeExplodedViewImage(incoming.exploded_view_image, pid);
+  }
+  return merged;
+}
+
+/** localUpdate 单个字段时也规范化资源类型 */
+function normalizeLocalUpdate(current: Project, field: string, value: unknown): Project {
+  const pid = current.id;
+  if (field === 'storyboard_images') {
+    return { ...current, storyboard_images: normalizeStoryboardImages(value, pid) };
+  }
+  if (field === 'appearance_images') {
+    return { ...current, appearance_images: normalizeAppearanceImages(value, pid) };
+  }
+  if (field === 'exploded_view_image') {
+    return { ...current, exploded_view_image: normalizeExplodedViewImage(value, pid) };
+  }
+  return { ...current, [field]: value };
+}
+
 function hasStepContent(project: Project | null, step: number) {
   if (!project) return false;
   switch (step) {
@@ -68,9 +101,17 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     case 'SET_PROJECT': {
       const viewedStep = getStoredViewedStep(action.payload);
       const isSameProject = state.project?.id === action.payload.id;
+      const pid = action.payload.id;
+      // 规范化所有项目资源：注入 projectId/stepKey/slotIndex（向后兼容旧数据）
+      const normalized: Project = {
+        ...action.payload,
+        storyboard_images: normalizeStoryboardImages(action.payload.storyboard_images, pid),
+        appearance_images: normalizeAppearanceImages(action.payload.appearance_images, pid),
+        exploded_view_image: normalizeExplodedViewImage(action.payload.exploded_view_image, pid),
+      };
       return {
         ...state,
-        project: action.payload,
+        project: normalized,
         // 同项目刷新 → 保持当前步骤；切换到其他项目 → 用新项目的步骤
         currentStep: isSameProject ? state.currentStep : viewedStep,
       };
@@ -121,19 +162,13 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       if (!state.project) return state;
       return {
         ...state,
-        project: {
-          ...state.project,
-          [action.payload.field]: action.payload.value,
-        },
+        project: normalizeLocalUpdate(state.project, action.payload.field, action.payload.value),
       };
     case 'MERGE_PROJECT':
       if (!state.project) return state;
       return {
         ...state,
-        project: {
-          ...state.project,
-          ...action.payload,
-        },
+        project: normalizeMerge(state.project, action.payload),
       };
     case 'MERGE_SILENT':
       if (!state.project) return state;
@@ -142,10 +177,7 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         isSaving: false,
         isLoading: false,
         lastSaved: new Date(),
-        project: {
-          ...state.project,
-          ...action.payload,
-        },
+        project: normalizeMerge(state.project, action.payload),
       };
     case 'RESET':
       return initialState;
@@ -215,6 +247,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
+      assertProjectBoundData(currentProject.id, updates as Record<string, unknown>);
+
       const response = await fetch(`/api/projects/${currentProject.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -262,6 +296,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     isSavingRef.current = true;
 
     try {
+      // 保存前强校验：确保所有资源数据绑定到当前项目
+      assertProjectBoundData(projectId, pending);
+
       const response = await fetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -286,6 +323,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       const pending = pendingSaveRef.current;
       const projectId = stateRef.current.project?.id;
       if (!pending || !projectId || Object.keys(pending).length === 0) return;
+
+      // 保存前强校验
+      try { assertProjectBoundData(projectId, pending as Record<string, unknown>); } catch { return; }
 
       const body = JSON.stringify(pending);
       // fetch + keepalive 确保页面卸载时请求完成
@@ -386,9 +426,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
         if (step === 3) {
           // 保留已有的图片，只生成空白槽位
-          const existingImages = currentProject.appearance_images || ['', '', ''];
-          const imageUrls: string[] = [...existingImages];
-          const indicesToGenerate = imageUrls.map((img, i) => img ? -1 : i).filter(i => i >= 0);
+          const existingImages = currentProject.appearance_images || [];
+          const imageUrls: AppearanceImage[] = [...existingImages];
+          while (imageUrls.length < 3) {
+            imageUrls.push({ projectId: currentProject.id, stepKey: 'appearance', slotIndex: imageUrls.length, url: '' });
+          }
+          const indicesToGenerate = imageUrls.map((img, i) => img?.url ? -1 : i).filter(i => i >= 0);
 
           for (const i of indicesToGenerate) {
             try {
@@ -405,7 +448,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
               if (data.error) throw new Error(data.error);
 
               if (data.imageUrl) {
-                imageUrls[i] = data.imageUrl;
+                imageUrls[i] = { projectId: currentProject.id, stepKey: 'appearance' as const, slotIndex: i, url: data.imageUrl, storagePath: data.storagePath || undefined, status: 'ready' };
                 // 本地即时更新 UI（不覆盖其他正在生成的图像）
                 setState({
                   type: 'UPDATE_FIELD',
@@ -459,7 +502,15 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
               if (data.error) throw new Error(data.error);
 
               if (data.imageUrl) {
-                const slot = { url: data.imageUrl, description: storyboardPrompts[i], prompt: storyboardPrompts[i], storagePath: data.storagePath || undefined };
+                const slot = {
+                  projectId: currentProject.id,
+                  stepKey: 'storyboard' as const,
+                  slotIndex: i,
+                  url: data.imageUrl,
+                  description: storyboardPrompts[i],
+                  prompt: storyboardPrompts[i],
+                  storagePath: data.storagePath || undefined,
+                };
                 storyboardImages[i] = slot;
                 // 本地即时更新 UI
                 setState({
