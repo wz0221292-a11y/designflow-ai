@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase/client';
-import { useImageJobs } from '@/lib/useImageJobs';
+import { useImageTaskStore } from '@/lib/useImageTaskStore';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface AppearanceStepProps {
@@ -17,94 +17,83 @@ interface AppearanceStepProps {
   onGenerated?: () => void;
 }
 
+const appearanceQualityConstraints = [
+  'pure white background',
+  'no logo',
+  'no text',
+  'no typography',
+  'no watermark',
+  'master-level rendering',
+  'museum-grade industrial design visualization',
+  'premium studio product rendering',
+].join(', ');
+
+const appearanceVariations = (idea: string) => [
+  `Hero product shot of ${idea}: pure white background, studio lighting, soft shadow beneath the product, 3/4 front angle showing the design silhouette, crisp edge definition, clean centered composition, ${appearanceQualityConstraints}, 8k photorealistic`,
+  `Full product view of ${idea}: pure white background, slightly elevated camera angle, product isolated with generous negative space, refined material finish, subtle ambient occlusion, premium catalog photography style, ${appearanceQualityConstraints}, photorealistic`,
+  `Detail and material study of ${idea}: pure white background, close-up macro angle focusing on surface textures, material junctions, and craftsmanship details, strong side lighting to reveal contours and finishes, minimal composition with negative space, ${appearanceQualityConstraints}, photorealistic`,
+];
+
 export default function AppearanceStep({ images, isLoading, idea, projectId, onUpdate, onSelectionChange, onGeneratingChange, selectedIndex, onGenerated }: AppearanceStepProps) {
   const currentImages = Array.isArray(images) ? images : ['', '', ''];
   const imagesRef = useRef(currentImages);
   const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(selectedIndex != null ? selectedIndex : null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  const [internalGeneratingSlots, setInternalGeneratingSlots] = useState<Record<number, boolean>>({});
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
-  // 本地锁：用户刚点击生成的 slot，在服务端确认 completed/failed 前，任何源都不能清掉它
-  const localPendingRef = useRef<Record<number, boolean>>({});
 
   useEffect(() => { imagesRef.current = currentImages; }, [currentImages]);
 
-  const generatingSlots = internalGeneratingSlots;
+  const { generatingSlots, completedImages, startGeneration, syncFromStore } = useImageTaskStore({ projectId, step: 'appearance' });
 
-  const setSlotGenerating = useCallback((index: number, value: boolean) => {
-    setInternalGeneratingSlots((prev) => { const next = { ...prev }; if (value) next[index] = true; else delete next[index]; return next; });
-  }, []);
+  const lastCompletedRef = useRef<string>('');
 
-  useEffect(() => { onGeneratingChange?.(Object.values(internalGeneratingSlots).some(Boolean)); }, [internalGeneratingSlots, onGeneratingChange]);
+  // 已完成图片 → 写入 project state（防无限循环：按内容比较而非引用）
+  useEffect(() => {
+    const urls = Object.entries(completedImages);
+    if (urls.length === 0) return;
+    const key = JSON.stringify(urls);
+    if (key === lastCompletedRef.current) return;
+    lastCompletedRef.current = key;
+    const newImages = [...imagesRef.current];
+    while (newImages.length < 3) newImages.push('');
+    for (const [idxStr, url] of urls) {
+      const idx = Number(idxStr);
+      if (idx >= 0 && idx < 3) newImages[idx] = url;
+    }
+    imagesRef.current = newImages;
+    onUpdate(newImages);
+  }, [completedImages, onUpdate]);
 
-  const commitImages = useCallback((updater: (images: string[]) => string[]) => {
-    const nextImages = updater([...(imagesRef.current || ['', '', ''])]);
-    imagesRef.current = nextImages;
-    onUpdate(nextImages);
-  }, [onUpdate]);
-
-  // useImageJobs 每 2s 轮询：同步生成中状态 + 合并已完成图片 URL
-  useImageJobs({
-    projectId, step: 'appearance',
-    onJobsLoaded: useCallback((slots: Record<number, boolean>, completedImages: Record<number, string>) => {
-      // 合并式更新 + 本地锁保护
-      setInternalGeneratingSlots(prev => {
-        const next = { ...prev };
-        // 用户刚点击生成的 slot 永远保留，直到终态
-        for (const key of Object.keys(localPendingRef.current)) { next[Number(key)] = true; }
-        // 服务端确认生成中
-        for (const idx of Object.keys(slots)) { next[Number(idx)] = true; }
-        // 只有终态才释放本地锁
-        for (const idx of Object.keys(completedImages)) {
-          delete localPendingRef.current[Number(idx)];
-          delete next[Number(idx)];
-        }
-        return next;
-      });
-      const completedSlots = Object.keys(completedImages).map(Number);
-      if (completedSlots.length > 0) {
-        commitImages(latest => {
-          const newImages = latest.length >= 3 ? [...latest] : ['', '', ''];
-          for (const idx of completedSlots) {
-            newImages[idx] = completedImages[idx];
-          }
-          return newImages;
-        });
-      }
-    }, [commitImages]),
-  });
+  useEffect(() => { onGeneratingChange?.(Object.values(generatingSlots).some(Boolean)); }, [generatingSlots, onGeneratingChange]);
 
   const generateImage = async (index: number) => {
     if (generatingSlots[index]) return;
-    localPendingRef.current[index] = true;
-    setSlotGenerating(index, true);
     setLastError(null);
-    let completedImmediately = false;
+    const pid = projectId;
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      const variations = [
-        `Hero product shot of ${idea}: studio lighting, dramatic spotlight from above, product on a dark reflective surface, 3/4 front angle showing the design silhouette, crisp shadow details, premium commercial photography style, clean composition centered on product, 8k photorealistic`,
-        `Lifestyle scene with ${idea}: product placed in a natural home or office environment, soft diffused window light, warm neutral tones, shallow depth of field with product sharp and background gently blurred, a person's hand naturally interacting with or reaching toward the product, editorial magazine style, aspirational mood, photorealistic`,
-        `Detail and material study of ${idea}: close-up macro angle focusing on surface textures, material junctions, and design details, strong side lighting to reveal contours and finishes, shallow depth of field, technical yet artistic, minimal composition with negative space, emphasize material quality and craftsmanship, photorealistic`,
-      ];
-      const prompt = variations[index] || variations[0];
-      const response = await fetch('/api/image', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'appearance', prompt, slotIndex: index, expectedTotal: 3, userId: user?.id, projectId }) });
-      const data = await response.json();
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status} (${response.statusText || '未知错误'})`);
-      if (data.imageUrl) { commitImages((latestImages) => { const newImages = latestImages.length >= 3 ? latestImages : ['', '', '']; newImages[index] = data.imageUrl; return newImages; }); completedImmediately = true; setLastError(null); }
+      const prompt = appearanceVariations(idea)[index] || appearanceVariations(idea)[0];
+      const result = await startGeneration({
+        slotIndex: index,
+        prompt,
+        previousImageUrl: currentImages[index] || undefined,
+        userId: user?.id,
+      });
+      if (result.imageUrl && projectId === pid) {
+        syncFromStore();
+        const newImages = [...imagesRef.current];
+        while (newImages.length < 3) newImages.push('');
+        newImages[index] = result.imageUrl;
+        imagesRef.current = newImages;
+        onUpdate(newImages);
+      } else if (result.imageUrl) {
+        syncFromStore();
+      }
     } catch (error: any) {
-      console.error('生成图片失败:', error);
-      delete localPendingRef.current[index];
-      setSlotGenerating(index, false);
+      if (projectId !== pid) return;
       setLastError(error.message || '生成失败，请重试');
-    }
-    // 同步返回 → 直接完成；异步 job → useImageJobs 每 2s 轮询 + 页面级 polling 每 1.5s 合并
-    if (completedImmediately) {
-      delete localPendingRef.current[index];
-      setSlotGenerating(index, false);
     }
   };
 
@@ -116,7 +105,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
   const confirmSelection = () => {
     if (pendingIndex !== null) {
       setSelectedImageIndex(pendingIndex); onSelectionChange?.(pendingIndex);
-      commitImages((latestImages) => latestImages);
+      onUpdate([...imagesRef.current]);
       setPendingIndex(null);
     }
     setShowConfirmDialog(false);
@@ -204,7 +193,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
                 isSelected
                   ? 'border-cyan-200 shadow-xl shadow-cyan-100/30 ring-1 ring-cyan-300'
                   : isThisSlotGenerating
-                  ? 'border-cyan-100 shadow-lg shadow-cyan-50/30'
+                  ? 'border-cyan-300 shadow-xl shadow-cyan-200/40 ring-2 ring-cyan-400/50 animate-pulse'
                   : 'border-slate-200/80 shadow-lg shadow-slate-200/20 hover:shadow-xl hover:-translate-y-0.5'
               }`}
             >
@@ -217,8 +206,8 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
                   <span className={`text-sm font-bold ${isThisSlotGenerating ? 'text-cyan-600' : 'text-slate-700'}`}>效果图 {index + 1}</span>
                 </div>
                 {isThisSlotGenerating && (
-                  <span className="flex items-center gap-1.5 rounded-full bg-cyan-50 px-2.5 py-1 text-[11px] font-bold text-cyan-600">
-                    <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-cyan-400 border-t-cyan-600" />生成中…
+                  <span className="flex items-center gap-1.5 rounded-full bg-gradient-to-r from-cyan-500 to-blue-500 px-3 py-1.5 text-[11px] font-black text-white shadow-md shadow-cyan-500/30 animate-pulse">
+                    <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />生成中…
                   </span>
                 )}
                 {isSelected && (
@@ -230,16 +219,62 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
 
               {/* Image area */}
               {img ? (
-                <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => setPreviewImage(img)}>
-                  <img src={img} alt={`外观设计 ${index + 1}`} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/10 via-transparent to-transparent opacity-0 transition group-hover:opacity-100" />
+                <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => !isThisSlotGenerating && setPreviewImage(img)}>
+                  <img src={img} alt={`外观设计 ${index + 1}`} className={`h-full w-full object-cover transition duration-500 ${isThisSlotGenerating ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`} />
+                  {/* 生成中遮罩 */}
+                  {isThisSlotGenerating && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-cyan-500/20 via-cyan-400/10 to-blue-500/20 backdrop-blur-[1px]">
+                      <div className="relative">
+                        <span className="absolute inset-0 h-12 w-12 animate-ping rounded-full bg-cyan-400/30" />
+                        <span className="relative flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 shadow-lg shadow-cyan-500/40">
+                          <svg className="h-6 w-6 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                        </span>
+                      </div>
+                      <div className="flex flex-col items-center gap-1">
+                        <span className="text-[13px] font-black text-cyan-700 drop-shadow-sm">正在重新生成…</span>
+                        <span className="text-[10px] font-bold text-cyan-600/80">方案 {index + 1} · 预计 20-60 秒</span>
+                      </div>
+                    </div>
+                  )}
+                  <div className={`absolute inset-0 bg-gradient-to-t from-black/10 via-transparent to-transparent transition ${isThisSlotGenerating ? 'opacity-0' : 'opacity-0 group-hover:opacity-100'}`} />
+                  {/* 生成中脉冲边框 */}
+                  {isThisSlotGenerating && (
+                    <div className="absolute inset-0 rounded-[1.75rem] ring-2 ring-cyan-400/60 animate-pulse pointer-events-none" />
+                  )}
                 </div>
               ) : (
-                <div className="flex aspect-square flex-col items-center justify-center gap-4 bg-gradient-to-b from-slate-50 to-white px-4">
-                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm border border-slate-200">
-                    <svg className="h-6 w-6 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-                  </div>
-                  <p className="text-xs font-medium text-slate-500 text-center">点击下方按钮生成方案 {index + 1}</p>
+                <div className={`flex aspect-square flex-col items-center justify-center gap-4 px-4 ${isThisSlotGenerating ? 'bg-gradient-to-b from-cyan-50 via-cyan-50/50 to-white' : 'bg-gradient-to-b from-slate-50 to-white'}`}>
+                  {isThisSlotGenerating ? (
+                    <>
+                      <div className="relative">
+                        <span className="absolute -inset-4 rounded-full bg-cyan-400/20 animate-pulse blur-xl" />
+                        <span className="absolute -inset-2 rounded-full bg-cyan-400/30 animate-ping" />
+                        <span className="relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 shadow-xl shadow-cyan-500/40">
+                          <svg className="h-7 w-7 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                        </span>
+                      </div>
+                      <div className="flex flex-col items-center gap-1">
+                        <span className="text-[14px] font-black text-cyan-700">AI 正在生成方案 {index + 1}</span>
+                        <span className="text-[11px] font-bold text-cyan-500">外观设计 · 预计 20-60 秒</span>
+                      </div>
+                      <div className="w-40 h-1 rounded-full bg-cyan-100 overflow-hidden">
+                        <div className="h-full w-2/3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500" style={{ animation: 'progress-bar-sweep 1.5s ease-in-out infinite' }} />
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm border border-slate-200">
+                        <svg className="h-6 w-6 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                      </div>
+                      <p className="text-xs font-medium text-slate-500 text-center">点击下方按钮生成方案 {index + 1}</p>
+                    </>
+                  )}
                 </div>
               )}
 

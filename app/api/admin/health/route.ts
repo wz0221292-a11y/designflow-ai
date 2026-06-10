@@ -178,6 +178,7 @@ export async function POST(request: NextRequest) {
       source_url: url,
       source_provider: 'img-cn.65535.space',
       status: 'ready',
+      file_size: saved.fileSize,
     }, { onConflict: 'project_id,asset_type,slot_index' });
 
     // Update projects JSONB (single slot)
@@ -195,7 +196,7 @@ export async function POST(request: NextRequest) {
       } else if (type === 'storyboard') {
         const images = ((project.storyboard_images as any[]) || []).slice(0, 6);
         while (images.length < 6) images.push({ url: '', description: '' });
-        images[slotIndex] = { ...images[slotIndex], url: saved.publicUrl };
+        images[slotIndex] = { ...images[slotIndex], url: saved.publicUrl, storagePath: saved.storagePath };
         await supabaseAdmin.from('projects').update({ storyboard_images: images }).eq('id', projectId);
       } else if (type === 'exploded_view') {
         await supabaseAdmin.from('projects').update({ exploded_view_image: saved.publicUrl }).eq('id', projectId);

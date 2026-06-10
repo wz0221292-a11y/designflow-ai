@@ -102,6 +102,7 @@ export async function generateContent(request: AIRequest): Promise<AIResponse> {
 interface StoryboardFramePrompt {
   index: number;
   sceneTitle: string;
+  description: string;
   shotType: string;
   visualPrompt: string;
 }
@@ -146,7 +147,19 @@ export async function generateStoryboardPrompts(
       return { success: false, error: 'AI 返回的帧数不正确，请重试' };
     }
 
-    return { success: true, frames: parsed.frames };
+    const frames = parsed.frames.map((frame, index) => {
+      const description = String(frame.description || frame.sceneTitle || '').trim();
+      return {
+        ...frame,
+        index: Number.isInteger(frame.index) ? frame.index : index,
+        sceneTitle: String(frame.sceneTitle || `分镜${index + 1}`).trim(),
+        description: description.length >= 15 ? description : `${description || frame.sceneTitle || `第${index + 1}帧`}，展示产品故事中的关键画面与人物情绪`,
+        shotType: String(frame.shotType || '').trim(),
+        visualPrompt: String(frame.visualPrompt || '').trim(),
+      };
+    });
+
+    return { success: true, frames };
   } catch (error: any) {
     console.error('Storyboard prompt generation error:', error);
     return { success: false, error: error.message || 'AI prompt generation failed' };

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/auth/admin';
+import { mergeStoryboardSlot } from '@/lib/storyboard';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +14,9 @@ export const dynamic = 'force-dynamic';
  *   field: 'appearance_images' | 'storyboard_images'
  *   index: number (0-based slot index)
  *   url: string (图片 URL，传 '' 表示清空)
+ *   description?: string (故事板槽位描述)
+ *   prompt?: string (故事板槽位提示词)
+ *   storagePath?: string (Supabase Storage 路径)
  *
  * 流程：
  *   1. 验证用户拥有该项目
@@ -79,12 +83,13 @@ export async function PATCH(
     }
 
     if (field === 'storyboard_images') {
-      // storyboard_images 数组中每项是 { url, description, prompt }
-      currentArray[index] = {
+      // storyboard_images 数组中每项是 { url, description, prompt, storagePath }
+      currentArray[index] = mergeStoryboardSlot(currentArray[index], {
         url,
-        description: (currentArray[index] as any)?.description || '',
-        prompt: (currentArray[index] as any)?.prompt || '',
-      };
+        description: typeof body.description === 'string' ? body.description : undefined,
+        prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
+        storagePath: typeof body.storagePath === 'string' ? body.storagePath : undefined,
+      });
     } else {
       // appearance_images 数组中每项是 string
       currentArray[index] = url;

@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useReducer, ReactNode, useRef } from 'react';
+import { createContext, useContext, useReducer, useCallback, useEffect, ReactNode, useRef } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import type { Project, ProjectState, ProjectAction } from '@/types';
 
@@ -163,6 +163,7 @@ interface ProjectContextType {
   updateProject: (updates: Partial<Project>) => Promise<void>;
   localUpdate: (field: string, value: any) => void;
   saveCurrentStep: () => Promise<void>;
+  flushPendingSave: () => Promise<void>;
   generateStep: (step: number, options?: { force?: boolean; referenceImage?: string | null }) => Promise<void>;
   nextStep: (options?: { autoGenerate?: boolean }) => Promise<void>;
   goToStep: (step: number) => Promise<void>;
@@ -173,6 +174,11 @@ const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(projectReducer, initialState);
   const stateRef = useRef(initialState);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSaveRef = useRef<Partial<Project> | null>(null);
+  const isSavingRef = useRef(false);
+  /** 防竞态：只允许最新一次 regenerate 的结果写回 */
+  const regenerateIdRef = useRef(0);
 
   const setState = (action: ProjectAction) => {
     stateRef.current = projectReducer(stateRef.current, action);
@@ -233,7 +239,78 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const localUpdate = (field: string, value: any) => {
     setState({ type: 'UPDATE_FIELD', payload: { field, value } });
     setState({ type: 'MARK_DIRTY' });
+
+    // 累加待保存字段
+    if (!pendingSaveRef.current) pendingSaveRef.current = {};
+    (pendingSaveRef.current as any)[field] = value;
+
+    // 防抖自动保存：停止输入 2 秒后保存所有待保存字段
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      flushPendingSave();
+    }, 2000);
   };
+
+  // 立即保存所有待保存字段到数据库
+  const flushPendingSave = useCallback(async () => {
+    const pending = pendingSaveRef.current;
+    if (!pending || Object.keys(pending).length === 0) return;
+    if (isSavingRef.current) return;
+    const projectId = stateRef.current.project?.id;
+    if (!projectId) return;
+    pendingSaveRef.current = null;
+    isSavingRef.current = true;
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pending),
+      });
+      const data = await response.json();
+      if (!data.error) {
+        setState({ type: 'MERGE_PROJECT', payload: data });
+        setState({ type: 'SET_LAST_SAVED', payload: new Date() });
+        setState({ type: 'SET_SAVING', payload: false });
+      }
+    } catch {
+      // 静默失败，下次自动保存会重试
+    } finally {
+      isSavingRef.current = false;
+    }
+  }, []);
+
+  // 页面关闭/刷新前保存所有未保存文字
+  useEffect(() => {
+    const handler = () => {
+      const pending = pendingSaveRef.current;
+      const projectId = stateRef.current.project?.id;
+      if (!pending || !projectId || Object.keys(pending).length === 0) return;
+
+      const body = JSON.stringify(pending);
+      // fetch + keepalive 确保页面卸载时请求完成
+      try {
+        fetch(`/api/projects/${projectId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true,
+        }).catch(() => {});
+      } catch {
+        // 静默失败
+      }
+    };
+    window.addEventListener('beforeunload', handler);
+    window.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        handler();
+      }
+    });
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+    };
+  }, []);
 
   // 生图轮询使用：只合并图片字段，不触发 loading/dirty
   const mergeImagesSilent = (images: Partial<Project>) => {
@@ -256,11 +333,21 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   };
 
   const saveCurrentStep = async () => {
+    // 先刷新待保存的自动保存内容
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    await flushPendingSave();
+
     const currentProject = stateRef.current.project;
-    if (!currentProject || !stateRef.current.hasUnsavedChanges) return;
+    if (!currentProject) return;
+    // 保存当前步骤的完整字段（即使之前没有标记 dirty，也确保数据一致）
     const field = stepFieldMapping[stateRef.current.currentStep];
     if (!field) return;
-    await updateProject({ [field]: (currentProject as any)[field] } as Partial<Project>);
+    const value = (currentProject as any)[field];
+    if (value === undefined || value === null) return;
+    await updateProject({ [field]: value } as Partial<Project>);
   };
 
   const generateStep = async (step: number, options: { force?: boolean; referenceImage?: string | null; autoTrigger?: boolean } = {}) => {
@@ -273,11 +360,14 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     // 跳过已完成的步骤（除非强制重新生成）
     if (!options.force && hasStepContent(currentProject, step)) return;
 
+    // 防竞态：每次"重新生成"递增 ID，只有最新请求的结果能写回
+    const requestId = ++regenerateIdRef.current;
+
     setState({ type: 'SET_LOADING', payload: true });
     setState({ type: 'SET_ERROR', payload: null });
     try {
       const stepNames = ['background', 'product_intro', 'personas', 'appearance', 'cmf', 'storyboard', 'exploded_view'];
-      let data: { error?: string; data?: any; imageUrl?: string };
+      let data: { error?: string; data?: any; imageUrl?: string; storagePath?: string };
 
       if (step === 3 || step === 5 || step === 6) {
         const imagePrompts: Record<number, string> = {
@@ -330,6 +420,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
                       field: 'appearance_images',
                       index: i,
                       url: data.imageUrl,
+                      storagePath: data.storagePath || null,
                     }),
                   });
                 } catch (slotErr: any) {
@@ -368,7 +459,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
               if (data.error) throw new Error(data.error);
 
               if (data.imageUrl) {
-                const slot = { url: data.imageUrl, description: storyboardPrompts[i], prompt: storyboardPrompts[i] };
+                const slot = { url: data.imageUrl, description: storyboardPrompts[i], prompt: storyboardPrompts[i], storagePath: data.storagePath || undefined };
                 storyboardImages[i] = slot;
                 // 本地即时更新 UI
                 setState({
@@ -384,6 +475,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
                       field: 'storyboard_images',
                       index: i,
                       url: data.imageUrl,
+                      storagePath: data.storagePath || null,
                     }),
                   });
                 } catch (slotErr: any) {
@@ -414,12 +506,16 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           data = await imageResponse.json();
           if (data.error) throw new Error(data.error);
 
+          if (requestId !== regenerateIdRef.current) return;
           const generatedData = data.imageUrl;
           await updateProject({ [stepFieldMapping[step]]: generatedData });
         } catch (err: any) {
+          if (requestId !== regenerateIdRef.current) return;
           console.error('生成爆炸图失败:', err);
         }
-        setState({ type: 'SET_LOADING', payload: false });
+        if (requestId === regenerateIdRef.current) {
+          setState({ type: 'SET_LOADING', payload: false });
+        }
         return;
       }
 
@@ -436,11 +532,16 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       data = await response.json();
       if (data.error) throw new Error(data.error);
 
+      // 竞态守卫：只有最新请求的结果能写回
+      if (requestId !== regenerateIdRef.current) return;
       await updateProject({ [stepFieldMapping[step]]: data.data });
     } catch (error: any) {
+      if (requestId !== regenerateIdRef.current) return;
       setState({ type: 'SET_ERROR', payload: error.message });
     } finally {
-      setState({ type: 'SET_LOADING', payload: false });
+      if (requestId === regenerateIdRef.current) {
+        setState({ type: 'SET_LOADING', payload: false });
+      }
     }
   };
 
@@ -448,6 +549,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     const currentProject = stateRef.current.project;
     const currentStep = stateRef.current.currentStep;
     if (!currentProject || currentStep >= 7) return;
+    // 切步骤前先刷新所有待保存文字
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    await flushPendingSave();
     const newStep = currentStep + 1;
     const skipUpdates: Partial<Project> = {
       current_step: Math.max(currentProject.current_step, newStep),
@@ -467,6 +574,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const goToStep = async (step: number) => {
     const currentProject = stateRef.current.project;
     if (!currentProject || step < 0 || step > 7) return;
+    // 切步骤前确保当前文字已保存
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    await flushPendingSave();
     storeViewedStep(currentProject.id, step);
     setState({ type: 'SET_STEP', payload: step });
     await generateStep(step, { autoTrigger: true });
@@ -483,6 +596,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         updateProject,
         localUpdate,
         saveCurrentStep,
+        flushPendingSave,
         generateStep,
         nextStep,
         goToStep,

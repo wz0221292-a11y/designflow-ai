@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS project_assets (
   public_url TEXT,
   source_url TEXT,
   source_provider TEXT,
+  file_size BIGINT,
   status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'missing', 'failed')),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -213,3 +214,17 @@ CREATE POLICY "Users can insert own assets" ON project_assets
 -- profiles 只能由客户端读取，敏感字段更新必须走服务端 API（service role）
 DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
 REVOKE UPDATE ON profiles FROM authenticated;
+
+-- image_jobs 幂等创建：client_request_id 唯一索引
+ALTER TABLE image_jobs ADD COLUMN IF NOT EXISTS client_request_id TEXT;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_image_jobs_client_request_id') THEN
+    UPDATE image_jobs SET client_request_id = 'image:' || project_id || ':legacy:' || id WHERE client_request_id IS NULL;
+    ALTER TABLE image_jobs ALTER COLUMN client_request_id SET NOT NULL;
+    CREATE UNIQUE INDEX idx_image_jobs_client_request_id ON image_jobs(client_request_id);
+  END IF;
+END $$;
+
+-- project_assets 存储用量追踪
+ALTER TABLE project_assets ADD COLUMN IF NOT EXISTS file_size BIGINT;

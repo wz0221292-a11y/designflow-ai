@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/auth/admin';
 import { buildImageUsageKey, getActivePlan, getImageLimitServer, isMembershipEnforced } from '@/lib/membership';
 import { generateImage } from '@/lib/image/replicate';
 import { persistGeneratedImage } from '@/lib/image/storage';
+import { normalizeStoryboardImages } from '@/lib/storyboard';
 
 const EXPECTED_TOTALS: Record<string, number> = {
   appearance: 3,
@@ -28,13 +29,22 @@ async function ensureJobsTable() {
   }
 }
 
-async function createJob(projectId: string, stepKey: string, slotIndex: number, prompt: string) {
+async function createJob(projectId: string, stepKey: string, slotIndex: number, prompt: string, clientRequestId?: string) {
   if (!(await ensureJobsTable())) return null;
   try {
+    const insertData: any = { project_id: projectId, step_key: stepKey, slot_index: slotIndex, prompt, status: 'processing' };
+    if (clientRequestId) insertData.client_request_id = clientRequestId;
     const { data, error } = await jobsTable()
-      .insert({ project_id: projectId, step_key: stepKey, slot_index: slotIndex, prompt, status: 'processing' })
+      .insert(insertData)
       .select()
       .single();
+    // 如果 client_request_id 列不存在，重试时不带该字段
+    if (error && clientRequestId && (error.message?.includes('client_request_id') || error.code === '42703')) {
+      const fallbackData: any = { project_id: projectId, step_key: stepKey, slot_index: slotIndex, prompt, status: 'processing' };
+      const { data: d2, error: e2 } = await jobsTable().insert(fallbackData).select().single();
+      if (e2) return null;
+      return d2;
+    }
     if (error) {
       if (error.code === '23505') {
         const { data: existing } = await jobsTable()
@@ -82,7 +92,7 @@ export async function POST(request: NextRequest) {
     // 身份仅从 session 获取；supabase 是用户客户端（受 RLS 保护）
     const { user, supabase } = await getCurrentUser();
     const body = await request.json();
-    const { projectId, type, slotIndex, expectedTotal, prompt, referenceImage } = body;
+    const { projectId, type, slotIndex, expectedTotal, prompt, referenceImage, clientRequestId } = body;
 
     if (!type || !(type in EXPECTED_TOTALS)) {
       return NextResponse.json({ error: '无效的图片生成类型' }, { status: 400 });
@@ -107,6 +117,24 @@ export async function POST(request: NextRequest) {
 
     if (projectError || !project) {
       return NextResponse.json({ error: '项目不存在或无权访问' }, { status: 404 });
+    }
+
+    // 幂等：先按 clientRequestId 查已有任务
+    if (clientRequestId) {
+      const { data: existingJob } = await supabaseAdmin
+        .from('image_jobs')
+        .select('*')
+        .eq('client_request_id', clientRequestId)
+        .maybeSingle();
+      if (existingJob) {
+        if (existingJob.status === 'completed' && existingJob.image_url) {
+          return NextResponse.json({ success: true, imageUrl: existingJob.image_url, job: existingJob });
+        }
+        if (existingJob.status === 'failed') {
+          return NextResponse.json({ error: existingJob.error_message || '任务已失败', job: existingJob }, { status: 409 });
+        }
+        return NextResponse.json({ success: true, job: existingJob });
+      }
     }
 
     // 会员检查（查当前 session 用户的 profile，RLS 允许读自己的）
@@ -165,7 +193,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const job = await createJob(projectId, type, slotIndex, jobPrompt);
+    const job = await createJob(projectId, type, slotIndex, jobPrompt, clientRequestId);
 
     let result;
     try {
@@ -216,6 +244,7 @@ export async function POST(request: NextRequest) {
         source_url: tempUrl,
         source_provider: 'img-cn.65535.space',
         status: 'ready',
+        file_size: saved.fileSize,
       }, { onConflict: 'project_id,asset_type,slot_index' });
     } catch (assetErr: any) {
       console.error('写入 project_assets 失败:', assetErr.message);
@@ -236,9 +265,8 @@ export async function POST(request: NextRequest) {
           existingImages[slotIndex] = finalUrl;
           await supabase.from('projects').update({ appearance_images: existingImages }).eq('id', projectId).eq('user_id', user.id);
         } else if (type === 'storyboard') {
-          const storyImages = (currentProject.storyboard_images as any[]) || [];
-          while (storyImages.length < 6) storyImages.push({ url: '', description: '' });
-          storyImages[slotIndex] = { ...storyImages[slotIndex], url: finalUrl };
+          const storyImages = normalizeStoryboardImages(currentProject.storyboard_images);
+          storyImages[slotIndex] = { ...storyImages[slotIndex], url: finalUrl, storagePath: saved.storagePath };
           await supabase.from('projects').update({ storyboard_images: storyImages }).eq('id', projectId).eq('user_id', user.id);
         } else if (type === 'exploded_view') {
           await supabase.from('projects').update({ exploded_view_image: finalUrl }).eq('id', projectId).eq('user_id', user.id);
@@ -259,6 +287,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       imageUrl: finalUrl,
+      storagePath: saved.storagePath,
       imageUsage: currentUsage + 1,
       imageLimit,
       job: completedJob || { ...job, status: 'completed', image_url: finalUrl },

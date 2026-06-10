@@ -19,6 +19,7 @@ interface PersistInput {
 interface PersistResult {
   publicUrl: string;
   storagePath: string;
+  fileSize: number;
 }
 
 export async function persistGeneratedImage({
@@ -71,5 +72,6 @@ export async function persistGeneratedImage({
   return {
     publicUrl: data.publicUrl,
     storagePath: path,
+    fileSize: ab.byteLength,
   };
 }

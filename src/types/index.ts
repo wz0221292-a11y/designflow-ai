@@ -58,6 +58,10 @@ export interface StoryboardImage {
   url: string;
   description: string;
   prompt?: string;
+  /** Supabase Storage 对象路径，用于 URL 失效后重建访问地址 */
+  storagePath?: string;
+  /** 内部版本标记，用于重整故事时防竞态 */
+  _regenerationId?: string;
 }
 
 export interface Announcement {

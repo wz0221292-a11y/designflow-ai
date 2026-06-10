@@ -174,6 +174,12 @@ body {
   50% { opacity: 1; }
 }
 
+@keyframes progress-bar-sweep {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
 @keyframes badge-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(129, 140, 248, 0.4); }
   50% { box-shadow: 0 0 0 8px rgba(129, 140, 248, 0); }
@@ -646,6 +652,153 @@ a {
   box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
 }
 
+/* ── Hero stage: 3D tilt + dynamic shine ── */
+.hero-stage {
+  perspective: 1000px;
+  transform-style: preserve-3d;
+}
+
+.hero-stage:hover {
+  z-index: 5;
+}
+
+.hero-preview-card {
+  position: relative;
+  z-index: 3;
+  will-change: transform;
+  transform: rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+  transition: transform 0.15s ease-out;
+}
+
+.hero-preview-card::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 22px;
+  background: radial-gradient(
+    circle at var(--shine-x, 50%) var(--shine-y, 35%),
+    rgba(59, 130, 246, 0.18),
+    rgba(129, 140, 248, 0.06) 40%,
+    transparent 70%
+  );
+  pointer-events: none;
+  z-index: -1;
+  opacity: 0.7;
+  transition: opacity 0.3s var(--ease-out-quart);
+}
+
+/* ── Hero satellite labels ── */
+.hero-satellite {
+  position: absolute;
+  z-index: 2;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  opacity: 0.65;
+  animation: satellite-orbit 8s ease-in-out infinite;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  background: rgba(15, 23, 42, 0.75);
+  color: #cbd5e1;
+}
+
+.hero-satellite--1 {
+  top: -12px;
+  left: 14%;
+  animation-delay: 0s;
+}
+
+.hero-satellite--2 {
+  top: 34%;
+  right: -18px;
+  animation-delay: -3.5s;
+}
+
+.hero-satellite--3 {
+  bottom: 18%;
+  left: -8px;
+  animation-delay: -6s;
+}
+
+@keyframes satellite-orbit {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(4px, -6px) scale(1.04); }
+  50% { transform: translate(-3px, 4px) scale(0.97); }
+  75% { transform: translate(-5px, -2px) scale(1.02); }
+}
+
+/* ── Mini panel (hero preview sub-cards) ── */
+.mini-panel {
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.35s var(--ease-out-quart), background 0.35s var(--ease-out-quart), transform 0.25s var(--ease-out-quart);
+}
+
+.mini-panel:hover {
+  border-color: color-mix(in srgb, var(--panel-accent, #3b82f6) 30%, transparent);
+  background: rgba(15, 23, 42, 0.7);
+  transform: translateY(-2px);
+}
+
+/* ── Live status pill ── */
+.live-status-pill {
+  animation: badge-pulse 2.4s ease-in-out infinite;
+}
+
+/* ── Magnetic field decoration ── */
+.magnetic-field {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.magnetic-field span {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(59, 130, 246, 0.06);
+  animation: field-ring 14s ease-in-out infinite;
+}
+
+.magnetic-field span:nth-child(1) {
+  width: 500px;
+  height: 500px;
+  top: 20%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  animation-delay: 0s;
+}
+
+.magnetic-field span:nth-child(2) {
+  width: 700px;
+  height: 700px;
+  top: 55%;
+  left: 35%;
+  transform: translate(-50%, -50%);
+  animation-delay: -5s;
+  animation-duration: 18s;
+}
+
+.magnetic-field span:nth-child(3) {
+  width: 900px;
+  height: 900px;
+  top: 40%;
+  left: 55%;
+  transform: translate(-50%, -50%);
+  animation-delay: -10s;
+  animation-duration: 20s;
+}
+
+@keyframes field-ring {
+  0%, 100% { opacity: 0.15; transform: translate(-50%, -50%) scale(1) rotate(0deg); }
+  33% { opacity: 0.35; transform: translate(-50%, -50%) scale(1.06) rotate(2deg); }
+  66% { opacity: 0.18; transform: translate(-50%, -50%) scale(0.95) rotate(-2deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -673,7 +826,9 @@ a {
   .ambient-orb,
   .dot-grid,
   .cursor-glow,
-  .particles-container {
+  .particles-container,
+  .magnetic-field,
+  .hero-satellite {
     display: none;
   }
 

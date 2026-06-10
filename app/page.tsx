@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase/client';
 import { useScrollReveal } from '@/hooks/useScrollReveal';
@@ -171,6 +171,19 @@ const featureNotes = [
   },
 ];
 
+const liveSignals = [
+  '背景研究已完成',
+  '外观方案生成中',
+  '故事板提示词已同步',
+  'PPT 文件准备导出',
+];
+
+const heroPanels = [
+  { title: '外观设计', text: '三张工业设计效果图', accent: '#60a5fa' },
+  { title: 'CMF 方案', text: '颜色、材料、表面工艺', accent: '#818cf8' },
+  { title: '故事板', text: '6 帧用户旅程分镜', accent: '#a78bfa' },
+];
+
 const primaryButton =
   'ripple inline-flex items-center justify-center rounded-full bg-[#3b82f6] px-6 py-3 text-sm font-bold text-white outline-none transition-all duration-300 ease-out hover:-translate-y-0.5 hover:bg-[#60a5fa] hover:shadow-[0_0_32px_rgba(37,99,235,0.45)] active:translate-y-0 focus-visible:ring-4 focus-visible:ring-[#3b82f6]/30';
 
@@ -180,6 +193,7 @@ const secondaryButton =
 export default function Home() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const previewRef = useRef<HTMLDivElement | null>(null);
 
   useScrollReveal();
   useMousePosition();
@@ -196,6 +210,27 @@ export default function Home() {
     const handleScroll = () => setScrolled(window.scrollY > 40);
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  const handlePreviewTilt = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const target = previewRef.current;
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    target.style.setProperty('--tilt-x', `${(-y * 7).toFixed(2)}deg`);
+    target.style.setProperty('--tilt-y', `${(x * 9).toFixed(2)}deg`);
+    target.style.setProperty('--shine-x', `${((x + 0.5) * 100).toFixed(1)}%`);
+    target.style.setProperty('--shine-y', `${((y + 0.5) * 100).toFixed(1)}%`);
+  }, []);
+
+  const resetPreviewTilt = useCallback(() => {
+    const target = previewRef.current;
+    if (!target) return;
+    target.style.setProperty('--tilt-x', '0deg');
+    target.style.setProperty('--tilt-y', '0deg');
+    target.style.setProperty('--shine-x', '50%');
+    target.style.setProperty('--shine-y', '35%');
   }, []);
 
   const handleRipple = useCallback((e: React.MouseEvent<HTMLAnchorElement | HTMLButtonElement>) => {
@@ -226,6 +261,11 @@ export default function Home() {
       <div className="ambient-orb ambient-orb--2" aria-hidden="true" />
       <div className="ambient-orb ambient-orb--3" aria-hidden="true" />
       <div className="dot-grid" aria-hidden="true" />
+      <div className="magnetic-field" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
       <div className="particles-container" aria-hidden="true">
         {Array.from({ length: 10 }).map((_, i) => (
           <div key={i} className="particle" />
@@ -333,10 +373,13 @@ export default function Home() {
           </div>
 
           {/* Right — Preview card */}
-          <div className="relative reveal-scale">
+          <div className="relative reveal-scale hero-stage" ref={previewRef} onMouseMove={handlePreviewTilt} onMouseLeave={resetPreviewTilt}>
             <div className="hero-orb hero-orb--1" aria-hidden="true" />
             <div className="hero-orb hero-orb--2" aria-hidden="true" />
-            <div className="df-card df-elevated border-glow float-card rounded-[22px] p-4">
+            <div className="hero-satellite hero-satellite--1" aria-hidden="true">AI</div>
+            <div className="hero-satellite hero-satellite--2" aria-hidden="true">CMF</div>
+            <div className="hero-satellite hero-satellite--3" aria-hidden="true">PDF</div>
+            <div className="df-card df-elevated border-glow float-card hero-preview-card rounded-[22px] p-4">
               <div className="hud-corners rounded-[18px] border border-[#1e293b] bg-[#0f172a]/90 p-5">
                 {/* Preview header */}
                 <div className="mb-5 flex items-start justify-between gap-3 border-b border-[#1e293b] pb-4">
@@ -348,10 +391,19 @@ export default function Home() {
                       智能宠物喂食器
                     </h2>
                   </div>
-                  <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[#34d399]/8 px-3 py-1 text-xs font-bold text-[#34d399] border border-[#34d399]/15">
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[#34d399]/8 px-3 py-1 text-xs font-bold text-[#34d399] border border-[#34d399]/15 live-status-pill">
                     <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#34d399] shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse" />
                     生成中
                   </span>
+                </div>
+                <div className="mb-4 grid grid-cols-3 gap-2">
+                  {heroPanels.map((panel) => (
+                    <div key={panel.title} className="mini-panel rounded-xl border border-[#1e293b] bg-[#020617]/55 p-3" style={{ '--panel-accent': panel.accent } as React.CSSProperties}>
+                      <span className="mb-2 block h-1.5 w-8 rounded-full" style={{ backgroundColor: panel.accent }} />
+                      <p className="text-[11px] font-bold text-[#e2e8f0]">{panel.title}</p>
+                      <p className="mt-1 text-[10px] leading-4 text-[#64748b]">{panel.text}</p>
+                    </div>
+                  ))}
                 </div>
                 {/* Step list */}
                 <div className="grid gap-2.5">

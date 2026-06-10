@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
 
     const { data: jobs, error } = await supabase
       .from('image_jobs')
-      .select('*')
+      .select('id, client_request_id, project_id, step_key, slot_index, prompt, provider, provider_job_id, status, image_url, error_message, created_at, updated_at')
       .eq('project_id', projectId)
       .eq('step_key', step)
       .order('slot_index', { ascending: true })
@@ -73,6 +73,7 @@ export async function GET(request: NextRequest) {
       .sort((a, b) => a.slot_index - b.slot_index)
       .map((job) => ({
         id: job.id,
+        clientRequestId: job.client_request_id,
         projectId: job.project_id,
         step: job.step_key,
         slotIndex: job.slot_index,

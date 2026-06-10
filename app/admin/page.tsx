@@ -41,6 +41,25 @@ type ChangelogEntry = {
   created_at: string;
 };
 
+type StorageSnapshot = {
+  totalBytes: number;
+  totalFiles: number;
+  sizedBytes: number;
+  sizedFiles: number;
+  unsizedFiles: number;
+  byType: Record<string, { bytes: number; files: number }>;
+  topUsers: Array<{ userId: string; email: string; bytes: number; files: number }>;
+  topProjects: Array<{ projectId: string; projectName: string; userId: string; userEmail: string; bytes: number; files: number }>;
+};
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+  return `${(bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 2)} ${sizes[i]}`;
+}
+
 // ── shared buttons ──────────────────────────────────────────────
 const btnBase = 'inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-bold outline-none transition hover:-translate-y-0.5 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0';
 const priBtn = `${btnBase} bg-[#6366f1] text-white hover:bg-[#818cf8] focus-visible:ring-4 focus-visible:ring-[#6366f1]/20`;
@@ -53,6 +72,7 @@ const TABS = [
   { key: 'announcements', label: '公告管理', icon: 'M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z' },
   { key: 'changelogs', label: '更新日志', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
   { key: 'health', label: '健康检查', icon: 'M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z' },
+  { key: 'storage', label: '存储用量', icon: 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4' },
 ];
 
 const CATEGORIES: Record<string, { label: string; color: string }> = {
@@ -108,6 +128,9 @@ export default function AdminPage() {
   const [fixResults, setFixResults] = useState<Record<string, 'ok' | 'fail'>>({});
   const [showCreateChangelog, setShowCreateChangelog] = useState(false);
   const [showCreateAnnouncement, setShowCreateAnnouncement] = useState(false);
+  // Storage
+  const [storage, setStorage] = useState<StorageSnapshot | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
 
   useEffect(() => { init(); }, []);
 
@@ -301,6 +324,16 @@ export default function AdminPage() {
       await fixSingleAsset(item.projectId, item.userId, a.type, a.slot, a.url, `${item.projectId}_${a.type}_${a.slot}`);
     }
     await fetchHealth();
+  };
+
+  const fetchStorage = async () => {
+    setStorageLoading(true);
+    try {
+      const r = await fetch('/api/admin/storage');
+      const d = await r.json();
+      if (r.ok) setStorage(d.storage);
+    } catch { /* ignore */ }
+    finally { setStorageLoading(false); }
   };
 
   // 导出更新日志为 Markdown 或 JSON 文件并触发下载
@@ -1162,6 +1195,176 @@ export default function AdminPage() {
                 </div>
               );
             })}
+          </section>
+        )}
+
+        {tab === 'storage' && (
+          <section>
+            {/* Header */}
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-5">
+              <div>
+                <h2 className="text-lg font-bold text-[#f1f5f9]">存储用量</h2>
+                <p className="mt-1 text-sm text-[#64748b]">
+                  Supabase Storage generated-images bucket 实际占用
+                </p>
+              </div>
+              <button
+                onClick={fetchStorage}
+                disabled={storageLoading}
+                className={`${priBtn} gap-2`}
+              >
+                <svg className={`h-4 w-4 ${storageLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {storageLoading ? '加载中...' : '刷新数据'}
+              </button>
+            </div>
+
+            {/* Loading */}
+            {storageLoading && (
+              <div className="flex items-center justify-center py-20 gap-3 text-[#64748b]">
+                <span className="h-6 w-6 animate-spin rounded-full border-2 border-[#1e293b] border-t-[#6366f1]" />
+                <span className="font-medium">正在拉取存储统计...</span>
+              </div>
+            )}
+
+            {/* Empty */}
+            {!storageLoading && !storage && (
+              <div className="df-card rounded-[22px] p-16 text-center">
+                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#1e293b]">
+                  <svg className="h-7 w-7 text-[#475569]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                  </svg>
+                </div>
+                <p className="font-bold text-[#64748b]">点击「刷新数据」查看 Storage 存储统计</p>
+              </div>
+            )}
+
+            {storage && !storageLoading && (
+              <>
+                {/* Top summary cards */}
+                <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                  {[
+                    { label: '存储总量', value: formatBytes(storage.totalBytes), cls: 'text-[#e2e8f0]', hint: `${storage.totalFiles} 个文件` },
+                    { label: '已计量', value: formatBytes(storage.sizedBytes), cls: 'text-[#34d399]', hint: `${storage.sizedFiles} 个文件` },
+                    { label: '未计量', value: `${storage.unsizedFiles} 个`, cls: storage.unsizedFiles > 0 ? 'text-[#fbbf24]' : 'text-[#64748b]', hint: '历史文件缺大小记录' },
+                    { label: '外观图', value: formatBytes(storage.byType.appearance?.bytes || 0), cls: 'text-[#38bdf8]', hint: `${storage.byType.appearance?.files || 0} 个` },
+                    { label: '故事板', value: formatBytes(storage.byType.storyboard?.bytes || 0), cls: 'text-[#a78bfa]', hint: `${storage.byType.storyboard?.files || 0} 个` },
+                    { label: '爆炸图', value: formatBytes(storage.byType.exploded_view?.bytes || 0), cls: 'text-[#fb923c]', hint: `${storage.byType.exploded_view?.files || 0} 个` },
+                  ].map(({ label, value, cls, hint }) => (
+                    <div key={label} className="rounded-2xl bg-[#0f172a]/70 ring-1 ring-white/5 p-4">
+                      <p className="text-[11px] font-bold text-[#64748b]">{label}</p>
+                      <p className={`mt-1 text-xl font-black ${cls}`}>{value}</p>
+                      <p className="mt-0.5 text-[10px] text-[#475569]">{hint}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Usage bar */}
+                <div className="mb-5 rounded-2xl bg-[#0f172a]/70 ring-1 ring-white/5 p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-bold text-[#f1f5f9]">Storage 使用率</span>
+                    <span className="text-xs font-bold text-[#64748b]">
+                      {formatBytes(storage.totalBytes)} / 1 GB（Free 配额）
+                    </span>
+                  </div>
+                  <div className="h-4 w-full rounded-full bg-[#1e293b] overflow-hidden ring-1 ring-white/5">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-[#6366f1] via-[#818cf8] to-[#a78bfa] transition-all duration-500"
+                      style={{ width: `${Math.min((storage.totalBytes / (1 * 1024 * 1024 * 1024)) * 100, 100).toFixed(1)}%` }}
+                    />
+                  </div>
+                  <p className="mt-1.5 text-[10px] text-[#475569]">
+                    {((storage.totalBytes / (1 * 1024 * 1024 * 1024)) * 100).toFixed(1)}% 已使用
+                    {storage.totalBytes > 1 * 1024 * 1024 * 1024 && (
+                      <span className="ml-1 text-[#ef4444] font-bold">已超过 Free 配额！</span>
+                    )}
+                  </p>
+                </div>
+
+                {/* Warning for unsized files */}
+                {storage.unsizedFiles > 0 && (
+                  <div className="mb-5 rounded-xl border border-[#fbbf24]/20 bg-[#fbbf24]/5 px-4 py-3 flex items-center gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[#fbbf24]/15 text-[10px] font-black text-[#fbbf24]">!</span>
+                    <p className="text-xs text-[#fbbf24]">
+                      有 {storage.unsizedFiles} 个历史文件缺少尺寸记录（存量数据），新生成的图片已自动记录 file_size。
+                      实际总用量可能略高于已计量值。
+                    </p>
+                  </div>
+                )}
+
+                {/* Two-column: top users + top projects */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                  {/* Top Users */}
+                  <div className="rounded-2xl bg-[#0f172a]/70 ring-1 ring-white/5 overflow-hidden">
+                    <div className="px-5 py-3 border-b border-[#1e293b]">
+                      <h3 className="text-sm font-bold text-[#f1f5f9]">用户用量 TOP 20</h3>
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      {storage.topUsers.length === 0 ? (
+                        <p className="p-5 text-xs text-[#64748b]">暂无数据</p>
+                      ) : (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-[#1e293b] text-[#64748b]">
+                              <th className="text-left px-5 py-2 font-bold">#</th>
+                              <th className="text-left py-2 font-bold">用户</th>
+                              <th className="text-right py-2 font-bold">文件</th>
+                              <th className="text-right px-5 py-2 font-bold">大小</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {storage.topUsers.map((u, i) => (
+                              <tr key={u.userId} className="border-b border-[#1e293b]/50 hover:bg-[#1e293b]/30 transition">
+                                <td className="px-5 py-2.5 text-[#475569] font-bold">{i + 1}</td>
+                                <td className="py-2.5 text-[#e2e8f0] font-medium max-w-[200px] truncate">{u.email}</td>
+                                <td className="py-2.5 text-right text-[#64748b]">{u.files}</td>
+                                <td className="px-5 py-2.5 text-right text-[#a78bfa] font-bold">{formatBytes(u.bytes)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Top Projects */}
+                  <div className="rounded-2xl bg-[#0f172a]/70 ring-1 ring-white/5 overflow-hidden">
+                    <div className="px-5 py-3 border-b border-[#1e293b]">
+                      <h3 className="text-sm font-bold text-[#f1f5f9]">项目用量 TOP 20</h3>
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      {storage.topProjects.length === 0 ? (
+                        <p className="p-5 text-xs text-[#64748b]">暂无数据</p>
+                      ) : (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-[#1e293b] text-[#64748b]">
+                              <th className="text-left px-5 py-2 font-bold">#</th>
+                              <th className="text-left py-2 font-bold">项目</th>
+                              <th className="text-left py-2 font-bold">用户</th>
+                              <th className="text-right py-2 font-bold">文件</th>
+                              <th className="text-right px-5 py-2 font-bold">大小</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {storage.topProjects.map((p, i) => (
+                              <tr key={p.projectId} className="border-b border-[#1e293b]/50 hover:bg-[#1e293b]/30 transition">
+                                <td className="px-5 py-2.5 text-[#475569] font-bold">{i + 1}</td>
+                                <td className="py-2.5 text-[#e2e8f0] font-medium max-w-[180px] truncate">{p.projectName}</td>
+                                <td className="py-2.5 text-[#64748b] max-w-[140px] truncate">{p.userEmail}</td>
+                                <td className="py-2.5 text-right text-[#64748b]">{p.files}</td>
+                                <td className="px-5 py-2.5 text-right text-[#a78bfa] font-bold">{formatBytes(p.bytes)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
           </section>
         )}
 
