@@ -199,6 +199,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
             syncFromStore();
             onGenerated?.();
             removeLocalRegenJob(projectId, j.slot_index, j.generation_id);
+            // 标记已处理，防止下一轮轮询重复触发
+            regenJobsRef.current[j.slot_index] = { status: 'completed' };
           }
         }
       } catch { /* transient */ }
