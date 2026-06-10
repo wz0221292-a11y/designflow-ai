@@ -191,6 +191,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   }, [projectId]);
 
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
+  useEffect(() => { regenJobsRef.current = regenJobs; }, [regenJobs]);
 
   const { generatingSlots, completedImages, startGeneration, syncFromStore } = useImageTaskStore({ projectId, step: 'storyboard' });
 
@@ -323,9 +324,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         // 新完成的 job → 刷新项目数据（文字+图片一起出现）+ 清理本地镜像
         for (const j of data.jobs || []) {
           if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
-            removeLocalRegenJob(projectId, j.slot_index);
+            // 先刷新项目（文字+图片一起出现），再清本地镜像
             syncFromStore();
             onGenerated?.();
+            removeLocalRegenJob(projectId, j.slot_index);
           }
         }
       } catch { /* transient */ }
@@ -342,21 +344,14 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // promptingSlots：前端 promptTasks + 服务端 regenJobs
+  // promptingSlots：唯一来源 regenJobs（服务端 frame_regeneration_jobs）
   const promptingSlots: Record<number, boolean> = {};
   const slotRegenKey: Record<number, string> = {};
-  for (const task of Object.values(promptTasks)) {
-    if (task.projectId === projectId && isPromptActive(task)) {
-      promptingSlots[task.slotIndex] = true;
-      slotRegenKey[task.slotIndex] = task.clientRequestId;
-    }
-  }
-  // 服务端 job 状态也反映到 prompting + generating
   for (const [idxStr, job] of Object.entries(regenJobs)) {
     const idx = Number(idxStr);
     if (job.status === 'queued' || job.status === 'generating_prompt') {
       promptingSlots[idx] = true;
-      slotRegenKey[idx] = job.generation_id || slotRegenKey[idx];
+      slotRegenKey[idx] = job.generationId || '';
     }
   }
 
@@ -368,8 +363,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   useEffect(() => {
     setPromptGenStatus('idle');
     setAiFramePrompts([]);
-    setRegenJobs({});
-    regenJobsRef.current = {};
+    // 切项目时从 localStorage 重新 hydrate 新项目的镜像（不清空）
+    const bySlot: Record<number, any> = {};
+    for (const job of Object.values(initializeFrameRegenStore(projectId))) bySlot[job.slotIndex] = job;
+    setRegenJobs(bySlot);
     setLastError(null);
   }, [projectId]);
 
