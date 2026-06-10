@@ -160,6 +160,16 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   const regenJobsRef = useRef<Record<number, any>>({});
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
   useEffect(() => { regenJobsRef.current = regenJobs; }, [regenJobs]);
+  // 订阅 store 变更 → upsertLocalRegenJob 后立即更新 React state
+  useEffect(() => {
+    return subscribeFrameRegen((all) => {
+      const bySlot: Record<number, any> = {};
+      for (const job of Object.values(all)) {
+        if (job.projectId === projectId) bySlot[job.slotIndex] = job;
+      }
+      setRegenJobs(bySlot);
+    });
+  }, [projectId]);
 
   const { generatingSlots, completedImages, startGeneration, syncFromStore } = useImageTaskStore({ projectId, step: 'storyboard' });
 
