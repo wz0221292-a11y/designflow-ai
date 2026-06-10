@@ -164,6 +164,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
   // 正在等新文案的槽位——该阶段不通过 onUpdate 触发自动保存，只标记 UI 状态
   const [slotsWithPendingText, setSlotsWithPendingText] = useState<Set<number>>(new Set());
+  const [slotsWithImageStarting, setSlotsWithImageStarting] = useState<Set<number>>(new Set());
 
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
 
@@ -196,6 +197,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         });
         // 新文案已到达，清除 pending 标记
         setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(task.slotIndex); return next; });
+    setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(task.slotIndex); return next; });
         setAiFramePrompts(prev => { const next = [...prev]; next[task.slotIndex] = prompt; return next; });
         return { description, prompt };
       },
@@ -230,6 +232,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         if (currentSlot.generationId && currentSlot.generationId !== task.clientRequestId) return;
         if (!result.prompt) return; // 空结果（版本被淘汰）
         const imageClientRequestId = deriveImageClientRequestId(task.clientRequestId);
+        setSlotsWithImageStarting(prev => new Set(prev).add(task.slotIndex));
         const { data: { user } } = await supabase.auth.getUser();
         const imageResult = await startImageGeneration({
           projectId: task.projectId,
@@ -241,6 +244,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           userId: user?.id,
           clientRequestId: imageClientRequestId,
         });
+        setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(task.slotIndex); return next; });
         const latestSlot = normalizeImages(imagesRef.current, projectId)[task.slotIndex];
         const patch = await fetch(`/api/projects/${task.projectId}/image-slot`, {
           method: 'PATCH',
@@ -293,6 +297,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   useEffect(() => {
     setPromptGenStatus('idle');
     setAiFramePrompts([]);
+    setSlotsWithImageStarting(new Set());
     setLastError(null);
   }, [projectId]);
 
@@ -413,7 +418,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
   // 单卡重新生成：只触发，模块级 runner 接管全部后续（generate → flush → startImage）
   const regenerateFrameAndImage = (idx: number) => {
-    if (generatingSlots[idx] || promptingSlots[idx]) return;
+    if (generatingSlots[idx] || promptingSlots[idx] || slotsWithImageStarting.has(idx)) return;
     setLastError(null);
     const task = startPromptTask(projectId, idx);
     const regenerationId = task.clientRequestId;
@@ -422,6 +427,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     cur[idx] = { ...cur[idx], description: '', prompt: '', generationId: regenerationId };
     imagesRef.current = cur;
     // 标记 UI 状态
+    setSlotsWithImageStarting(prev => { const next = new Set(prev); next.add(idx); return next; });
     setSlotsWithPendingText(prev => new Set(prev).add(idx));
     setPromptTasks(initializePromptStore());
     void ensurePromptTaskRunning(task);
@@ -571,8 +577,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
               {/* Image */}
               {hasImg ? (
-                <div className="relative aspect-video cursor-pointer overflow-hidden bg-slate-100" onClick={() => !isGen && !promptingSlots[idx] && setPreviewImage(img.url)}>
-                  <img src={img.url} alt={SCENE_LABELS[idx]} className={`h-full w-full object-cover transition duration-500 ${isGen || promptingSlots[idx] ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`}
+                <div className="relative aspect-video cursor-pointer overflow-hidden bg-slate-100" onClick={() => !isGen && !promptingSlots[idx] && !slotsWithImageStarting.has(idx) && setPreviewImage(img.url)}>
+                  <img src={img.url} alt={SCENE_LABELS[idx]} className={`h-full w-full object-cover transition duration-500 ${isGen || promptingSlots[idx] || slotsWithImageStarting.has(idx) ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`}
                     onError={(e) => {
                       const { url } = resolveImageUrl(null, img.storagePath || null);
                       if (url && url !== (e.target as HTMLImageElement).src) {
@@ -581,7 +587,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                     }}
                   />
                   {/* 生成中遮罩 */}
-                  {(isGen || promptingSlots[idx]) && (
+                  {(isGen || promptingSlots[idx] || slotsWithImageStarting.has(idx)) && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-amber-500/20 via-amber-400/10 to-orange-500/20 backdrop-blur-[1px]">
                       <div className="relative">
                         <span className="absolute inset-0 h-12 w-12 animate-ping rounded-full bg-amber-400/30" />
@@ -602,7 +608,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                       </div>
                     </div>
                   )}
-                  <div className={`absolute inset-0 bg-black/0 transition-colors ${isGen || promptingSlots[idx] ? '' : 'group-hover:bg-black/5'}`} />
+                  <div className={`absolute inset-0 bg-black/0 transition-colors ${isGen || promptingSlots[idx] || slotsWithImageStarting.has(idx) ? '' : 'group-hover:bg-black/5'}`} />
                   <span className="absolute top-2.5 left-2.5 flex h-6 w-6 items-center justify-center rounded-lg bg-black/45 text-[11px] font-bold text-white backdrop-blur-sm">{idx + 1}</span>
                   {/* 生成中脉冲边框 */}
                   {isGen && (
@@ -654,10 +660,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                   <span className="text-[13px] font-bold text-slate-700 truncate">{SCENE_LABELS[idx]}</span>
                   {hasImg && !isGen && (
                     <button onClick={() => regenerateFrameAndImage(idx)}
-                      disabled={!!promptingSlots[idx]}
+                      disabled={!!promptingSlots[idx] || slotsWithImageStarting.has(idx)}
                       className="ml-auto inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 outline-none transition-all hover:bg-white hover:border-slate-300 hover:text-slate-700 active:scale-[0.96] disabled:opacity-50"
                       title="重新生成此分镜（先刷新故事描述，再生成图片）">
-                      {promptingSlots[idx] ? (
+                      {promptingSlots[idx] || slotsWithImageStarting.has(idx) ? (
                         <><span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />重整故事…</>
                       ) : (
                         <><svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>重想故事再生图</>
