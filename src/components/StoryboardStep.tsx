@@ -275,6 +275,11 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   // resume：挂载/切路由回来时恢复所有 unexpired running 任务
   useEffect(() => {
     const tasks = getResumableRunningTasks(projectId);
+    if (tasks.length > 0) {
+      const pending = new Set(tasks.map(t => t.slotIndex));
+      setSlotsWithPendingText(pending);
+      setSlotsWithImageStarting(pending);
+    }
     for (const task of tasks) void ensurePromptTaskRunning(task);
   }, [projectId, promptTasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
