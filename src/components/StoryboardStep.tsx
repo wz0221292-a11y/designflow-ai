@@ -4,19 +4,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { ProductIntro, StoryboardImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
-import {
-  initializePromptStore,
-  subscribePromptTasks,
-  startPromptTask,
-  isPromptActive,
-  getResumableRunningTasks,
-  setPromptTaskExecutor,
-  clearPromptTaskExecutor,
-  ensurePromptTaskRunning,
-  deriveImageClientRequestId,
-  type PromptTask,
-} from '@/lib/promptTaskStore';
-import { startImageGeneration } from '@/lib/imageTaskStore';
 import { resolveImageUrl } from '@/lib/image/urlResolver';
 import { normalizeStoryboardImages, safeFrameForProject } from '@/lib/storyboard';
 import {
@@ -160,15 +147,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
 
-  // ── 提示词任务状态机（模块级执行器） ──
-  const [promptTasks, setPromptTasks] = useState<Record<string, PromptTask>>(() => {
-    if (typeof window === 'undefined') return {};
-    return initializePromptStore();
-  });
-
   const [aiFramePrompts, setAiFramePrompts] = useState<string[]>([]);
   const imagesRef = useRef<StoryboardImage[]>(normalizeImages(images, projectId));
-
   // ── 服务端 frame regeneration jobs（唯一流程真相源 + 本地镜像）──
   const [regenJobs, setRegenJobs] = useState<Record<number, any>>(() => {
     if (typeof window === 'undefined') return {};
@@ -178,126 +158,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return bySlot;
   });
   const regenJobsRef = useRef<Record<number, any>>({});
-
-  // 订阅跨组件/store变更
-  useEffect(() => {
-    return subscribeFrameRegen((all) => {
-      const bySlot: Record<number, any> = {};
-      for (const job of Object.values(all)) {
-        if (job.projectId === projectId) bySlot[job.slotIndex] = job;
-      }
-      setRegenJobs(bySlot);
-    });
-  }, [projectId]);
-
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
   useEffect(() => { regenJobsRef.current = regenJobs; }, [regenJobs]);
 
   const { generatingSlots, completedImages, startGeneration, syncFromStore } = useImageTaskStore({ projectId, step: 'storyboard' });
-
-  // 注入模块级执行器：generateFramePrompt 生命周期脱离组件
-  useEffect(() => {
-    const pid = projectId;
-    setPromptTaskExecutor(
-      // (1) 生成提示词
-      async (task) => {
-        if (task.projectId !== pid) throw new Error('SKIP_STALE');
-        const { description, prompt } = await generateFramePrompt(task.slotIndex);
-        // 写帧 state —— 但必须校验版本号：只有当前帧的 _regenerationId 还匹配，才允许写回
-        const regenerationId = task.clientRequestId;
-        const currentFrame = normalizeImages(imagesRef.current, pid)[task.slotIndex];
-        if (currentFrame.generationId && currentFrame.generationId !== regenerationId) {
-          // 不是本轮重整的结果，丢弃
-          return { description: '', prompt: '' };
-        }
-        commitDescriptions(latest => {
-          const n = normalizeImages(latest, pid);
-          n[task.slotIndex] = {
-            ...n[task.slotIndex],
-            description,
-            prompt,
-            generationId: regenerationId,
-          };
-          return n;
-        });
-        // 新文案已到达
-        setAiFramePrompts(prev => { const next = [...prev]; next[task.slotIndex] = prompt; return next; });
-        return { description, prompt };
-      },
-      // (2) flush 保存帧到 DB
-      async (task, result) => {
-        if (task.projectId !== pid) return;
-        // 校验版本号：不是本轮重整的结果，不写入 DB
-        const currentFrame = normalizeImages(imagesRef.current, pid)[task.slotIndex];
-        if (currentFrame.generationId && currentFrame.generationId !== task.clientRequestId) return;
-        if (!result.description && !result.prompt) return; // 空结果（版本被淘汰）
-        const res = await fetch(`/api/projects/${task.projectId}/image-slot`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            field: 'storyboard_images',
-            index: task.slotIndex,
-            url: currentFrame?.url || '',
-            description: result.description,
-            prompt: result.prompt,
-            storagePath: currentFrame?.storagePath || null,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok || data.error) throw new Error(data.error || '保存故事板描述失败');
-        onFlushSave?.();
-      },
-      // (3) 触发生图（幂等：clientRequestId 由 prompt task 派生）
-      async (task, result) => {
-        if (task.projectId !== pid) return;
-        // 校验版本号
-        const currentSlot = normalizeImages(imagesRef.current, pid)[task.slotIndex];
-        if (currentSlot.generationId && currentSlot.generationId !== task.clientRequestId) return;
-        if (!result.prompt) return; // 空结果（版本被淘汰）
-        const imageClientRequestId = deriveImageClientRequestId(task.clientRequestId);
-        const { data: { user } } = await supabase.auth.getUser();
-        const imageResult = await startImageGeneration({
-          projectId: task.projectId,
-          step: 'storyboard',
-          slotIndex: task.slotIndex,
-          prompt: result.prompt,
-          referenceImage: referenceImage || undefined,
-          previousImageUrl: imagesRef.current[task.slotIndex]?.url || undefined,
-          userId: user?.id,
-          clientRequestId: imageClientRequestId,
-        });
-        const latestSlot = normalizeImages(imagesRef.current, projectId)[task.slotIndex];
-        const patch = await fetch(`/api/projects/${task.projectId}/image-slot`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            field: 'storyboard_images',
-            index: task.slotIndex,
-            url: imageResult.imageUrl || latestSlot?.url || '',
-            description: result.description,
-            prompt: result.prompt,
-            storagePath: imageResult.storagePath || latestSlot?.storagePath || null,
-          }),
-        });
-        const patchData = await patch.json();
-        if (!patch.ok || patchData.error) throw new Error(patchData.error || '保存故事板图片槽位失败');
-        syncFromStore();
-      },
-    );
-    return () => clearPromptTaskExecutor();
-  }, [projectId, idea, productIntro, referenceImage, selectedAppearanceIndex]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // hydrate 后同步 + 订阅
-  useEffect(() => {
-    setPromptTasks(initializePromptStore());
-    return subscribePromptTasks((updated) => setPromptTasks(updated));
-  }, []);
-
-  // resume：挂载/切路由回来时恢复所有 unexpired running 任务（前端 promptTasks 过渡期保留）
-  useEffect(() => {
-    const tasks = getResumableRunningTasks(projectId);
-    for (const task of tasks) void ensurePromptTaskRunning(task);
-  }, [projectId, promptTasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 轮询服务端 frame regeneration jobs + reconcile 本地镜像 ──
   useEffect(() => {
@@ -311,7 +175,6 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         if (!res.ok || cancelled) return;
         const data = await res.json();
 
-        // reconcile 到本地 store（store 内部 notify → React state 自动更新）
         reconcileServerRegenJobs((data.jobs || []).map((j: any) => ({
           jobId: j.id,
           projectId: j.project_id || projectId,
@@ -321,10 +184,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           updatedAt: Date.now(),
         })));
 
-        // 新完成的 job → 刷新项目数据（文字+图片一起出现）+ 清理本地镜像
         for (const j of data.jobs || []) {
           if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
-            // 先刷新项目（文字+图片一起出现），再清本地镜像
             syncFromStore();
             onGenerated?.();
             removeLocalRegenJob(projectId, j.slot_index, j.generation_id);
@@ -332,11 +193,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         }
       } catch { /* transient */ }
 
-      // 检查是否还有活跃 job → 继续轮询
       const all = initializeFrameRegenStore(projectId);
-      const hasActive = Object.values(all).some(
-        (j: any) => j.status !== 'completed' && j.status !== 'failed',
-      );
+      const hasActive = Object.values(all).some((j: any) => j.status !== 'completed' && j.status !== 'failed');
       if (!cancelled && hasActive) timer = setTimeout(poll, 2000);
     };
 
@@ -344,7 +202,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // promptingSlots：唯一来源 regenJobs（服务端 frame_regeneration_jobs）
+  // ── 最终 UI 只从 frameRegenStore 派生，不再混入 promptTaskStore ──
   const promptingSlots: Record<number, boolean> = {};
   const slotRegenKey: Record<number, string> = {};
   for (const [idxStr, job] of Object.entries(regenJobs)) {
