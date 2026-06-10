@@ -357,7 +357,11 @@ export async function startImageGeneration(input: {
       prompt: input.prompt,
       expectedTotal: input.step === 'appearance' ? 3 : input.step === 'storyboard' ? 6 : 1,
     };
-    if (input.referenceImage) body.referenceImage = input.referenceImage;
+    // 安全提取：兼容旧调用可能传入对象的情况
+    const refUrl = typeof input.referenceImage === 'string'
+      ? input.referenceImage
+      : (input.referenceImage as any)?.url;
+    if (refUrl) body.referenceImage = refUrl;
     if (input.userId) body.userId = input.userId;
 
     const res = await fetch('/api/image', {

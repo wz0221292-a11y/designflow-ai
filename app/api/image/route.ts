@@ -92,7 +92,12 @@ export async function POST(request: NextRequest) {
     // 身份仅从 session 获取；supabase 是用户客户端（受 RLS 保护）
     const { user, supabase } = await getCurrentUser();
     const body = await request.json();
-    const { projectId, type, slotIndex, expectedTotal, prompt, referenceImage, clientRequestId } = body;
+    const { projectId, type, slotIndex, expectedTotal, prompt, clientRequestId } = body;
+    // 安全提取：兼容客户端可能传入对象的情况
+    const rawRef = body.referenceImage;
+    const referenceImage: string | undefined = typeof rawRef === 'string'
+      ? rawRef
+      : (rawRef && typeof rawRef === 'object' ? (rawRef as any).url : undefined);
 
     if (!type || !(type in EXPECTED_TOTALS)) {
       return NextResponse.json({ error: '无效的图片生成类型' }, { status: 400 });
@@ -261,15 +266,26 @@ export async function POST(request: NextRequest) {
 
       if (currentProject) {
         if (type === 'appearance') {
-          const existingImages = Array.from({ length: 3 }, (_, i) => (currentProject.appearance_images as string[])?.[i] || '');
-          existingImages[slotIndex] = finalUrl;
-          await supabase.from('projects').update({ appearance_images: existingImages }).eq('id', projectId).eq('user_id', user.id);
+          // 兼容旧 string[] 和新对象格式
+          const raw = (currentProject.appearance_images as any[]) || [];
+          const images: any[] = [];
+          for (let i = 0; i < 3; i++) {
+            const item = raw[i];
+            const existing = typeof item === 'string' ? { url: item } : (item || {});
+            images.push(i === slotIndex
+              ? { ...existing, url: finalUrl, storagePath: saved.storagePath, projectId, stepKey: 'appearance', slotIndex: i }
+              : existing
+            );
+          }
+          await supabase.from('projects').update({ appearance_images: images }).eq('id', projectId).eq('user_id', user.id);
         } else if (type === 'storyboard') {
           const storyImages = normalizeStoryboardImages(currentProject.storyboard_images, projectId);
           storyImages[slotIndex] = { ...storyImages[slotIndex], url: finalUrl, storagePath: saved.storagePath };
           await supabase.from('projects').update({ storyboard_images: storyImages }).eq('id', projectId).eq('user_id', user.id);
         } else if (type === 'exploded_view') {
-          await supabase.from('projects').update({ exploded_view_image: finalUrl }).eq('id', projectId).eq('user_id', user.id);
+          await supabase.from('projects').update({
+            exploded_view_image: { projectId, stepKey: 'exploded_view', slotIndex: 0, url: finalUrl, storagePath: saved.storagePath, status: 'ready' },
+          }).eq('id', projectId).eq('user_id', user.id);
         }
       }
     } catch (saveErr: any) {

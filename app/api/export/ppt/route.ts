@@ -71,7 +71,11 @@ export async function POST(request: NextRequest) {
 
     // 校验所有图片 URL
     const imageUrls: string[] = [];
-    if (projectData.appearance_images) imageUrls.push(...(projectData.appearance_images as string[]));
+    // 兼容旧 string[] 和新 AppearanceImage[]
+    if (projectData.appearance_images) {
+      const urls = (projectData.appearance_images as any[]).map((img: any) => typeof img === 'string' ? img : img?.url).filter(Boolean);
+      imageUrls.push(...urls);
+    }
     if (projectData.storyboard_images) {
       (projectData.storyboard_images as any[]).forEach((s: any) => {
         if (s.url) imageUrls.push(s.url);
