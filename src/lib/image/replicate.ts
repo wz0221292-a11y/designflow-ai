@@ -22,9 +22,9 @@ export async function generateImage(request: ImageRequest): Promise<ImageRespons
 
   try {
     const consistencyPrompt = request.referenceImage
-      ? 'Strictly preserve the exact same product appearance, shape, proportions, colors, materials, details and design language from the reference image. Do not redesign the product.'
+      ? '. Strictly preserve the exact same product appearance, shape, proportions, colors, materials, details and design language from the reference image. Do not redesign the product.'
       : '';
-    const enhancedPrompt = `${request.prompt}, ${consistencyPrompt}, product design, professional, high quality, detailed, 8k`;
+    const enhancedPrompt = `${request.prompt}${consistencyPrompt}`;
 
     let response: Response;
 

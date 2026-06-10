@@ -25,6 +25,22 @@ const stepFieldMapping: Record<number, keyof Project> = {
   6: 'exploded_view_image',
 };
 
+function getViewedStepKey(projectId: string) {
+  return `project_viewed_step_${projectId}`;
+}
+
+function getStoredViewedStep(project: Project) {
+  if (typeof window === 'undefined') return project.current_step;
+  const raw = window.localStorage.getItem(getViewedStepKey(project.id));
+  const step = raw ? Number.parseInt(raw, 10) : project.current_step;
+  return Number.isInteger(step) && step >= 0 && step <= 7 ? step : project.current_step;
+}
+
+function storeViewedStep(projectId: string, step: number) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(getViewedStepKey(projectId), String(step));
+}
+
 function hasStepContent(project: Project | null, step: number) {
   if (!project) return false;
   switch (step) {
@@ -39,7 +55,7 @@ function hasStepContent(project: Project | null, step: number) {
     case 4:
       return Boolean(project.cmf);
     case 5:
-      return Boolean(project.storyboard_images?.some((image) => image.url || image.description));
+      return (project.storyboard_images?.filter((image) => image?.url).length || 0) >= 6;
     case 6:
       return Boolean(project.exploded_view_image);
     default:
@@ -49,12 +65,16 @@ function hasStepContent(project: Project | null, step: number) {
 
 function projectReducer(state: ProjectState, action: ProjectAction): ProjectState {
   switch (action.type) {
-    case 'SET_PROJECT':
+    case 'SET_PROJECT': {
+      const viewedStep = getStoredViewedStep(action.payload);
+      const isSameProject = state.project?.id === action.payload.id;
       return {
         ...state,
         project: action.payload,
-        currentStep: state.project ? state.currentStep : action.payload.current_step,
+        // 同项目刷新 → 保持当前步骤；切换到其他项目 → 用新项目的步骤
+        currentStep: isSameProject ? state.currentStep : viewedStep,
       };
+    }
     case 'SET_STEP':
       return {
         ...state,
@@ -115,6 +135,18 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
           ...action.payload,
         },
       };
+    case 'MERGE_SILENT':
+      if (!state.project) return state;
+      return {
+        ...state,
+        isSaving: false,
+        isLoading: false,
+        lastSaved: new Date(),
+        project: {
+          ...state.project,
+          ...action.payload,
+        },
+      };
     case 'RESET':
       return initialState;
     default:
@@ -126,6 +158,8 @@ interface ProjectContextType {
   state: ProjectState;
   dispatch: React.Dispatch<ProjectAction>;
   fetchProject: (id: string) => Promise<void>;
+  refreshProjectSilent: (id: string) => Promise<void>;
+  mergeImagesSilent: (images: Partial<Project>) => void;
   updateProject: (updates: Partial<Project>) => Promise<void>;
   localUpdate: (field: string, value: any) => void;
   saveCurrentStep: () => Promise<void>;
@@ -148,16 +182,22 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const fetchProject = async (id: string) => {
     setState({ type: 'SET_LOADING', payload: true });
     setState({ type: 'SET_ERROR', payload: null });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
-      const response = await fetch(`/api/projects/${id}`);
+      const response = await fetch(`/api/projects/${id}`, { cache: 'no-store', signal: controller.signal });
       const data = await response.json();
       if (data.error) throw new Error(data.error);
       setState({ type: 'SET_PROJECT', payload: data });
       setState({ type: 'SET_LOADING', payload: false });
       setState({ type: 'SET_LAST_SAVED', payload: new Date() });
     } catch (error: any) {
-      setState({ type: 'SET_ERROR', payload: error.message });
+      const isTimeout = error.name === 'AbortError' || error.message?.includes('abort') || error.message?.includes('超时');
+      const message = isTimeout ? '连接超时，无法加载项目。请检查网络后刷新重试。' : error.message;
+      setState({ type: 'SET_ERROR', payload: message });
       setState({ type: 'SET_LOADING', payload: false });
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
@@ -166,25 +206,53 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     if (!currentProject) return;
     setState({ type: 'SET_SAVING', payload: true });
     setState({ type: 'SET_ERROR', payload: null });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch(`/api/projects/${currentProject.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
+        signal: controller.signal,
       });
       const data = await response.json();
       if (data.error) throw new Error(data.error);
       setState({ type: 'MERGE_PROJECT', payload: data });
       setState({ type: 'SET_LAST_SAVED', payload: new Date() });
-    } catch (error: any) {
-      setState({ type: 'SET_ERROR', payload: error.message });
       setState({ type: 'SET_SAVING', payload: false });
+    } catch (error: any) {
+      const isTimeout = error.name === 'AbortError' || error.message?.includes('abort') || error.message?.includes('超时');
+      const message = isTimeout ? '保存超时，请检查网络后重试。' : error.message;
+      setState({ type: 'SET_ERROR', payload: message });
+      setState({ type: 'SET_SAVING', payload: false });
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
   const localUpdate = (field: string, value: any) => {
     setState({ type: 'UPDATE_FIELD', payload: { field, value } });
     setState({ type: 'MARK_DIRTY' });
+  };
+
+  // 生图轮询使用：只合并图片字段，不触发 loading/dirty
+  const mergeImagesSilent = (images: Partial<Project>) => {
+    setState({ type: 'MERGE_SILENT', payload: images });
+  };
+
+  // 后台静默刷新：不影响 loading 和 dirty 状态
+  const refreshProjectSilent = async (id: string) => {
+    try {
+      const response = await fetch(`/api/projects/${id}`, {
+        cache: 'no-store',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      setState({ type: 'MERGE_SILENT', payload: data });
+    } catch (error) {
+      console.error('静默刷新项目失败:', error);
+    }
   };
 
   const saveCurrentStep = async () => {
@@ -240,18 +308,39 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
                 body: JSON.stringify({
                   type: stepNames[step],
                   prompt: `${imagePrompts[step]}, variation ${i + 1}, distinct visual direction`,
-                  userId: user?.id,
                   projectId: currentProject.id,
                 }),
               });
               data = await imageResponse.json();
               if (data.error) throw new Error(data.error);
-              imageUrls[i] = data.imageUrl || '';
+
+              if (data.imageUrl) {
+                imageUrls[i] = data.imageUrl;
+                // 本地即时更新 UI（不覆盖其他正在生成的图像）
+                setState({
+                  type: 'UPDATE_FIELD',
+                  payload: { field: 'appearance_images', value: [...imageUrls] },
+                });
+                // 原子写入单个槽位 —— 关键：不会覆盖其他槽位已完成的图
+                try {
+                  await fetch(`/api/projects/${currentProject.id}/image-slot`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      field: 'appearance_images',
+                      index: i,
+                      url: data.imageUrl,
+                    }),
+                  });
+                } catch (slotErr: any) {
+                  console.error(`写入外观图片槽位 ${i} 失败:`, slotErr);
+                }
+              }
             } catch (err: any) {
               console.error(`生成外观图片 ${i + 1} 失败:`, err);
             }
           }
-          await updateProject({ appearance_images: imageUrls });
+          // 不再 await updateProject({ appearance_images: imageUrls }) —— 避免整体覆盖
           setState({ type: 'SET_LOADING', payload: false });
           return;
         }
@@ -272,18 +361,40 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
                   type: stepNames[step],
                   prompt: `故事板分镜 ${i + 1}/6,${storyboardPrompts[i]},${currentProject.idea}`,
                   referenceImage,
-                  userId: user?.id,
                   projectId: currentProject.id,
                 }),
               });
               data = await imageResponse.json();
               if (data.error) throw new Error(data.error);
-              storyboardImages[i] = { url: data.imageUrl || '', description: storyboardPrompts[i], prompt: storyboardPrompts[i] };
+
+              if (data.imageUrl) {
+                const slot = { url: data.imageUrl, description: storyboardPrompts[i], prompt: storyboardPrompts[i] };
+                storyboardImages[i] = slot;
+                // 本地即时更新 UI
+                setState({
+                  type: 'UPDATE_FIELD',
+                  payload: { field: 'storyboard_images', value: [...storyboardImages] },
+                });
+                // 原子写入单个槽位
+                try {
+                  await fetch(`/api/projects/${currentProject.id}/image-slot`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      field: 'storyboard_images',
+                      index: i,
+                      url: data.imageUrl,
+                    }),
+                  });
+                } catch (slotErr: any) {
+                  console.error(`写入故事板槽位 ${i} 失败:`, slotErr);
+                }
+              }
             } catch (err: any) {
               console.error(`生成故事板图片 ${i + 1} 失败:`, err);
             }
           }
-          await updateProject({ storyboard_images: storyboardImages });
+          // 不再 await updateProject({ storyboard_images: storyboardImages }) —— 避免整体覆盖
           setState({ type: 'SET_LOADING', payload: false });
           return;
         }
@@ -297,7 +408,6 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
               type: stepNames[step],
               prompt: imagePrompts[step],
               referenceImage,
-              userId: user?.id,
               projectId: currentProject.id,
             }),
           });
@@ -347,6 +457,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       (skipUpdates as any)[skippedField] = null;
     }
     await updateProject(skipUpdates);
+    storeViewedStep(currentProject.id, newStep);
     setState({ type: 'SET_STEP', payload: newStep });
     if (options.autoGenerate !== false) {
       await generateStep(newStep, { autoTrigger: true });
@@ -354,10 +465,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   };
 
   const goToStep = async (step: number) => {
-    if (step >= 0 && step <= 7) {
-      setState({ type: 'SET_STEP', payload: step });
-      await generateStep(step, { autoTrigger: true });
-    }
+    const currentProject = stateRef.current.project;
+    if (!currentProject || step < 0 || step > 7) return;
+    storeViewedStep(currentProject.id, step);
+    setState({ type: 'SET_STEP', payload: step });
+    await generateStep(step, { autoTrigger: true });
   };
 
   return (
@@ -366,6 +478,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         state,
         dispatch,
         fetchProject,
+        refreshProjectSilent,
+        mergeImagesSilent,
         updateProject,
         localUpdate,
         saveCurrentStep,

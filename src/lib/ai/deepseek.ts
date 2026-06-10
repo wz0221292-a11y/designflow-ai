@@ -96,3 +96,59 @@ export async function generateContent(request: AIRequest): Promise<AIResponse> {
     return { success: false, error: error.message || 'AI generation failed' };
   }
 }
+
+// ── 故事板提示词生成 ────────────────────────────────────────
+
+interface StoryboardFramePrompt {
+  index: number;
+  sceneTitle: string;
+  shotType: string;
+  visualPrompt: string;
+}
+
+interface StoryboardPromptsResult {
+  frames: StoryboardFramePrompt[];
+}
+
+export async function generateStoryboardPrompts(
+  idea: string,
+  context?: string,
+): Promise<{ success: boolean; frames?: StoryboardFramePrompt[]; error?: string }> {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) return { success: false, error: 'AI API key not configured' };
+
+  try {
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [
+          { role: 'system', content: '你是一位资深电影分镜师和广告导演，擅长为产品故事板撰写精准的英文视觉提示词。你只输出JSON，不输出任何解释。' },
+          { role: 'user', content: prompts.storyboardPrompts(idea, context) },
+        ],
+        temperature: 0.8,
+        max_tokens: 3000,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error?.message || `DeepSeek API ${response.status}`);
+    }
+
+    const data = await response.json();
+    let content = data.choices[0]?.message?.content || '';
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed: StoryboardPromptsResult = JSON.parse(content);
+
+    if (!parsed.frames || !Array.isArray(parsed.frames) || parsed.frames.length !== 6) {
+      return { success: false, error: 'AI 返回的帧数不正确，请重试' };
+    }
+
+    return { success: true, frames: parsed.frames };
+  } catch (error: any) {
+    console.error('Storyboard prompt generation error:', error);
+    return { success: false, error: error.message || 'AI prompt generation failed' };
+  }
+}

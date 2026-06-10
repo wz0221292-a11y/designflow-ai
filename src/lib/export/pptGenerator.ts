@@ -61,9 +61,21 @@ function splitContent(content: string, maxChars = 520): string[] {
   return chunks;
 }
 
-function addImageSafe(slide: any, path: string, x: number, y: number, w: number, h: number) {
-  if (!path) return;
-  (slide as any).addImage({ path, x, y, w, h, sizing: { type: 'crop' } });
+function addImageSafe(slide: any, dataUri: string | null, x: number, y: number, w: number, h: number) {
+  if (!dataUri) return;
+  (slide as any).addImage({ data: dataUri, x, y, w, h, sizing: { type: 'crop' } });
+}
+
+function addImagePlaceholder(slide: any, x: number, y: number, w: number, h: number, label = '图片缺失') {
+  (slide as any).addShape('rect', {
+    x, y, w, h,
+    fill: { color: SURFACE },
+    line: { color: BORDER, width: 0.5, dashType: 'dash' },
+  });
+  (slide as any).addText(label, {
+    x, y, w, h,
+    fontSize: 8, fontFace: FONT, color: MUTED, align: 'center', valign: 'middle',
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -196,17 +208,64 @@ function addFeatureGrid(slide: any, items: string[], y: number, accent: string) 
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Image fetching
+// Image fetching (safe: no direct URL passthrough to pptxgenjs)
 // ═══════════════════════════════════════════════════════════════
 
-async function fetchImageAsBase64(url: string): Promise<{ data: Buffer; type: 'png' | 'jpeg' } | null> {
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB per image
+const MAX_TOTAL_IMAGE_BYTES = 40 * 1024 * 1024; // 40 MB total
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const IMAGE_FETCH_TIMEOUT = 5000;
+
+let pptTotalImageBytes = 0;
+
+function resetPptImageBytes() {
+  pptTotalImageBytes = 0;
+}
+
+async function fetchImageAsBase64(url: string): Promise<string | null> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(IMAGE_FETCH_TIMEOUT),
+      redirect: 'error', // 拒绝重定向
+    });
     if (!res.ok) return null;
-    const ct = res.headers.get('content-type') || '';
+
+    // 校验 Content-Type
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (!ALLOWED_IMAGE_TYPES.some((t) => ct.startsWith(t))) {
+      console.warn(`PPT 导出拒绝非图片响应: ${ct} from ${url}`);
+      return null;
+    }
+
+    // 预检 Content-Length
+    const contentLength = Number(res.headers.get('content-length') || 0);
+    if (contentLength > MAX_IMAGE_BYTES) {
+      console.warn(`PPT 导出图片过大(content-length): ${contentLength} bytes from ${url}`);
+      return null;
+    }
+
     const ab = await res.arrayBuffer();
-    return { data: new Uint8Array(ab) as any, type: ct.includes('png') ? 'png' : 'jpeg' };
-  } catch { return null; }
+    if (ab.byteLength > MAX_IMAGE_BYTES) {
+      console.warn(`PPT 导出图片过大(actual): ${ab.byteLength} bytes from ${url}`);
+      return null;
+    }
+
+    pptTotalImageBytes += ab.byteLength;
+    if (pptTotalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
+      throw new Error('导出图片总大小超过限制');
+    }
+
+    const bytes = new Uint8Array(ab);
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.slice(i, i + 8192)));
+    }
+    const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'jpeg' : 'jpeg';
+    return `data:image/${ext};base64,${btoa(chunks.join(''))}`;
+  } catch (e: any) {
+    if (e.message?.includes('总大小超过限制')) throw e;
+    return null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -226,6 +285,31 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
     background: true, product_intro: true, personas: true,
     appearance: true, cmf: true, storyboard: true, exploded_view: true,
   };
+
+  // ═══════════════════════════════════════════════════════════
+  // Pre-fetch all images as data URIs (never pass raw URLs to pptxgenjs)
+  // ═══════════════════════════════════════════════════════════
+  resetPptImageBytes();
+  const imgDataUriMap = new Map<string, string | null>();
+
+  const urlsToFetch = [
+    ...appearanceImages,
+    ...storyboardImages.map((img: any) => img.url),
+    project.exploded_view_image,
+  ].filter((u): u is string => Boolean(u));
+
+  await Promise.all(
+    urlsToFetch.map(async (url) => {
+      if (!imgDataUriMap.has(url)) {
+        const b64 = await fetchImageAsBase64(url);
+        imgDataUriMap.set(url, b64);
+      }
+    }),
+  );
+
+  function getImg(url: string): string | null {
+    return imgDataUriMap.get(url) ?? null;
+  }
 
   pptx.layout = 'LAYOUT_16x9';
   pptx.title = t(intro?.name) || '设计方案';
@@ -493,7 +577,7 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
       const x = MARGIN + col * (colW + gap);
       const y = CONTENT_TOP + 0.8 + row * (imgH + 0.38);
 
-      addImageSafe(slide, img, x, y, colW, imgH);
+      addImageSafe(slide, getImg(img), x, y, colW, imgH);
       (slide as any).addText(`效果图 ${i + 1}`, {
         x, y: y + imgH + 0.04, w: colW, h: 0.18,
         fontSize: 7, fontFace: FONT, color: MUTED, align: 'center',
@@ -576,7 +660,7 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
       const x = MARGIN + col * (colW + gap);
       const y = CONTENT_TOP + 0.75 + row * (imgH + 0.55);
 
-      addImageSafe(slide, img.url, x, y, colW, imgH);
+      addImageSafe(slide, getImg(img.url), x, y, colW, imgH);
       (slide as any).addText(t(img.description), {
         x, y: y + imgH + 0.04, w: colW, h: 0.38,
         fontSize: 7, fontFace: FONT, color: MUTED,
@@ -592,7 +676,7 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
     const slide = pptx.addSlide();
     addSectionTitle(slide, '爆炸图', '产品结构分解视图');
     addFooter(slide, pageNum++);
-    addImageSafe(slide, project.exploded_view_image, MARGIN, CONTENT_TOP + 0.8, CW, CONTENT_BOT - CONTENT_TOP - 0.9);
+    addImageSafe(slide, getImg(project.exploded_view_image), MARGIN, CONTENT_TOP + 0.8, CW, CONTENT_BOT - CONTENT_TOP - 0.9);
   }
 
   const output = await pptx.write({ outputType: 'arraybuffer' }) as ArrayBuffer;

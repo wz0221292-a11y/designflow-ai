@@ -1,7 +1,7 @@
 'use client';
 
 import type { ProductIntro } from '@/types';
-import StepHeader, { stepInputClass, stepSubCardClass } from './StepHeader';
+import StepHeader, { stepSubCardClass } from './StepHeader';
 
 interface ProductIntroStepProps {
   data: ProductIntro | null;
@@ -10,163 +10,144 @@ interface ProductIntroStepProps {
 }
 
 export default function ProductIntroStep({ data, isLoading, onUpdate }: ProductIntroStepProps) {
-  const handleChange = (field: keyof ProductIntro, value: string | string[]) => {
-    onUpdate({
-      ...data,
-      name: data?.name || '',
-      tagline: data?.tagline || '',
-      features: data?.features || [],
-      scenario: data?.scenario || '',
-      [field]: value,
-    });
+  const defaults: ProductIntro = {
+    name: '', tagline: '', target_users: '', problem: '',
+    features: [], advantages: '', scenario: '',
   };
+  const d = { ...defaults, ...data };
+
+  const handleChange = (field: keyof ProductIntro, value: string | string[]) => {
+    onUpdate({ ...d, [field]: value } as ProductIntro);
+  };
+
+  const features = d.features;
+  const filledFeatures = features.filter(Boolean).length;
 
   const handleFeatureChange = (index: number, value: string) => {
-    const newFeatures = [...(data?.features || [])];
-    newFeatures[index] = value;
-    handleChange('features', newFeatures);
+    const next = [...features];
+    next[index] = value;
+    handleChange('features', next);
   };
+  const addFeature = () => handleChange('features', [...features, '']);
+  const removeFeature = (index: number) => handleChange('features', features.filter((_, i) => i !== index));
 
-  const addFeature = () => {
-    const newFeatures = [...(data?.features || []), ''];
-    handleChange('features', newFeatures);
-  };
-
-  const removeFeature = (index: number) => {
-    const newFeatures = (data?.features || []).filter((_, i) => i !== index);
-    handleChange('features', newFeatures);
-  };
-
-  const hasContent = Boolean(data?.name || data?.tagline || (data?.features?.length && data.features.some(Boolean)) || data?.scenario);
+  if (isLoading) {
+    return (
+      <div className={`${stepSubCardClass} p-6 sm:p-8`}>
+        <div className="space-y-6">
+          <div className="h-20 rounded-[1.5rem] bg-gradient-to-br from-slate-100 to-slate-200 animate-pulse" />
+          <div className="h-20 rounded-[1.5rem] bg-gradient-to-br from-slate-100 to-slate-200 animate-pulse w-4/5" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {[1, 2, 3, 4].map(i => (
+              <div key={i} className="h-14 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-200 animate-pulse" />
+            ))}
+          </div>
+          <div className="h-36 rounded-[1.5rem] bg-gradient-to-br from-slate-100 to-slate-200 animate-pulse" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`${stepSubCardClass} p-6 sm:p-8`}>
       <StepHeader
         title="产品介绍"
-        description="定义产品名称、定位、核心功能与使用场景"
+        description="产品名称 · 定位 · 目标用户 · 痛点 · 核心功能 · 优势 · 使用场景"
         accent="indigo"
         icon={
-          <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+          <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        }
+        action={
+          Boolean(d.name) ? (
+            <div className="flex items-center gap-2 rounded-full bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-600">
+              <span className="flex h-2.5 w-2.5 rounded-full bg-indigo-500" />
+              {d.name}
+            </div>
+          ) : undefined
         }
       />
 
-      {/* Status banner */}
-      {hasContent && (
-        <div className="mb-6 rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-blue-50/50 px-5 py-3.5 text-sm font-semibold text-indigo-800 flex items-center gap-3 shadow-sm">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-100">
-            <svg className="h-5 w-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+      <div className="space-y-6">
+        {/* ── Identity: Name + Tagline ── */}
+        <div className="grid gap-5 sm:grid-cols-[1fr_auto_1fr]">
+          <div className="rounded-[1.5rem] border border-indigo-100 bg-white p-6 shadow-sm transition-all focus-within:ring-4 focus-within:ring-indigo-50">
+            <label className="mb-1 inline-flex items-center gap-2 rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-500">产品名称</label>
+            <input type="text" value={d.name} onChange={(e) => handleChange('name', e.target.value)}
+              className="mt-3 w-full border-none bg-transparent text-2xl font-black tracking-tight text-slate-950 outline-none placeholder:font-bold placeholder:text-slate-300 focus:ring-0"
+              placeholder="为产品命名" />
           </div>
-          <span>产品介绍已填充，可继续编辑优化</span>
-        </div>
-      )}
-
-      {isLoading ? (
-        <div className="space-y-6">
-          <div className="h-16 rounded-[1.25rem] bg-slate-100 animate-pulse" />
-          <div className="h-16 rounded-[1.25rem] bg-slate-100 animate-pulse w-5/6" />
-          <div className="h-40 rounded-[1.25rem] bg-slate-100 animate-pulse" />
-        </div>
-      ) : (
-        <div className="space-y-5">
-          {/* ── Product Name ── */}
-          <div className="group overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-md shadow-slate-200/20 transition-all focus-within:border-indigo-300 focus-within:shadow-lg focus-within:shadow-indigo-100/20 focus-within:ring-2 focus-within:ring-indigo-200">
-            <div className="h-1.5 w-full bg-gradient-to-r from-indigo-500 to-blue-500" />
-            <div className="px-5 py-4">
-              <div className="mb-2.5 flex items-center gap-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-50">
-                  <svg className="h-3.5 w-3.5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
-                </div>
-                <label className="text-xs font-black uppercase tracking-wider text-indigo-600">产品名称</label>
-              </div>
-              <input
-                type="text"
-                value={data?.name || ''}
-                onChange={(e) => handleChange('name', e.target.value)}
-                className="w-full border-none bg-transparent text-xl font-black text-slate-950 outline-none placeholder:font-bold placeholder:text-slate-300 focus:ring-0"
-                placeholder="为你的产品取一个名字"
-              />
-            </div>
-          </div>
-
-          {/* ── Tagline ── */}
-          <div className="group overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-sm shadow-slate-200/10 transition-all focus-within:border-indigo-300 focus-within:shadow-md focus-within:ring-2 focus-within:ring-indigo-200">
-            <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-50">
-                <svg className="h-3.5 w-3.5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" /></svg>
-              </div>
-              <label className="text-xs font-black uppercase tracking-wider text-amber-600">一句话定位</label>
-            </div>
-            <input
-              type="text"
-              value={data?.tagline || ''}
-              onChange={(e) => handleChange('tagline', e.target.value)}
-              className="w-full border-none bg-white px-5 py-4 text-sm font-bold text-slate-800 outline-none placeholder:font-medium placeholder:text-slate-400 focus:ring-0"
-              placeholder="用一句话简洁描述产品定位和价值主张"
-            />
-          </div>
-
-          {/* ── Features ── */}
-          <div className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-sm shadow-slate-200/10">
-            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
-              <div className="flex items-center gap-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-50">
-                  <svg className="h-3.5 w-3.5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
-                </div>
-                <label className="text-xs font-black uppercase tracking-wider text-emerald-600">核心功能</label>
-              </div>
-              <span className="text-[10px] font-bold text-slate-400">{(data?.features || []).filter(Boolean).length} 项</span>
-            </div>
-            <div className="space-y-2 p-4">
-              {(data?.features || []).map((feature, index) => (
-                <div key={index} className="group/item flex items-center gap-3">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-xs font-black text-slate-500 transition group-hover/item:bg-emerald-100 group-hover/item:text-emerald-600">
-                    {index + 1}
-                  </span>
-                  <input
-                    type="text"
-                    value={feature}
-                    onChange={(e) => handleFeatureChange(index, e.target.value)}
-                    className={`flex-1 rounded-xl border border-slate-100 bg-slate-50 px-4 py-2.5 text-sm font-medium text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white focus:ring-2 focus:ring-emerald-100`}
-                    placeholder={`功能 ${index + 1}`}
-                  />
-                  <button
-                    onClick={() => removeFeature(index)}
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-slate-300 transition hover:bg-red-50 hover:text-red-500"
-                    aria-label="删除功能"
-                  >
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                  </button>
-                </div>
-              ))}
-              {(data?.features || []).length < 8 && (
-                <button
-                  onClick={addFeature}
-                  className="mt-1 inline-flex items-center gap-2 rounded-xl border-2 border-dashed border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-500 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-600"
-                >
-                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                  添加功能
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* ── Scenario ── */}
-          <div className="group overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-sm shadow-slate-200/10 transition-all focus-within:border-indigo-300 focus-within:shadow-md focus-within:ring-2 focus-within:ring-indigo-200">
-            <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-rose-50">
-                <svg className="h-3.5 w-3.5 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-              </div>
-              <label className="text-xs font-black uppercase tracking-wider text-rose-600">使用场景</label>
-            </div>
-            <textarea
-              value={data?.scenario || ''}
-              onChange={(e) => handleChange('scenario', e.target.value)}
-              className="h-28 w-full resize-none border-none bg-white px-5 py-4 text-sm font-medium leading-relaxed text-slate-800 outline-none placeholder:font-medium placeholder:text-slate-400 focus:ring-0"
-              placeholder="描述用户会在什么样的情境下使用这个产品"
-            />
+          <div className="hidden sm:block w-px bg-gradient-to-b from-transparent via-slate-200 to-transparent" />
+          <div className="rounded-[1.5rem] border border-amber-100 bg-white p-6 shadow-sm transition-all focus-within:ring-4 focus-within:ring-amber-50">
+            <label className="mb-1 inline-flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-amber-600">一句话定位</label>
+            <input type="text" value={d.tagline} onChange={(e) => handleChange('tagline', e.target.value)}
+              className="mt-3 w-full border-none bg-transparent text-lg font-bold text-slate-700 outline-none placeholder:font-semibold placeholder:text-slate-300 focus:ring-0"
+              placeholder="核心价值主张" />
           </div>
         </div>
-      )}
+
+        {/* ── Target Users + Problem ── */}
+        <div className="grid gap-5 sm:grid-cols-2">
+          <div className="rounded-[1.5rem] border border-sky-100 bg-white p-6 shadow-sm transition-all focus-within:ring-4 focus-within:ring-sky-50">
+            <label className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-sky-600">👤 目标用户</label>
+            <textarea value={d.target_users} onChange={(e) => handleChange('target_users', e.target.value)}
+              className="mt-3 h-24 w-full resize-none border-none bg-transparent text-sm font-medium leading-6 text-slate-700 outline-none placeholder:font-medium placeholder:text-slate-300 focus:ring-0"
+              placeholder="谁会使用这个产品？描述典型用户画像…" />
+          </div>
+          <div className="rounded-[1.5rem] border border-orange-100 bg-white p-6 shadow-sm transition-all focus-within:ring-4 focus-within:ring-orange-50">
+            <label className="inline-flex items-center gap-1.5 rounded-full bg-orange-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-orange-600">⚡ 核心问题</label>
+            <textarea value={d.problem} onChange={(e) => handleChange('problem', e.target.value)}
+              className="mt-3 h-24 w-full resize-none border-none bg-transparent text-sm font-medium leading-6 text-slate-700 outline-none placeholder:font-medium placeholder:text-slate-300 focus:ring-0"
+              placeholder="产品要解决什么具体问题或痛点？" />
+          </div>
+        </div>
+
+        {/* ── Features ── */}
+        <section className="overflow-hidden rounded-[1.5rem] border border-emerald-100 bg-white shadow-sm">
+          <div className="flex items-center justify-between border-b border-emerald-50 bg-emerald-50/30 px-6 py-4">
+            <div className="flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500 text-white text-sm font-black">{filledFeatures}</span>
+              <div><h3 className="text-sm font-black text-slate-900">核心功能</h3><p className="text-[11px] font-medium text-slate-500">产品能力的清晰表达</p></div>
+            </div>
+            {features.length < 8 && (
+              <button onClick={addFeature} className="rounded-full bg-emerald-600 px-4 py-2 text-[11px] font-bold text-white shadow-sm outline-none transition hover:bg-emerald-700 active:scale-[0.97]">+ 添加</button>
+            )}
+          </div>
+          <div className="p-4 space-y-2">
+            {features.map((f, i) => (
+              <div key={i} className="group flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3 transition hover:border-emerald-100 hover:bg-white">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-emerald-500 text-[10px] font-black text-white">{i + 1}</span>
+                <input type="text" value={f} onChange={(e) => handleFeatureChange(i, e.target.value)}
+                  className="flex-1 border-none bg-transparent text-sm font-semibold text-slate-800 outline-none placeholder:text-slate-400 focus:ring-0"
+                  placeholder={`功能 ${i + 1}`} />
+                <button onClick={() => removeFeature(i)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-300 opacity-0 transition hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"><svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12"/></svg></button>
+              </div>
+            ))}
+            {features.length === 0 && (
+              <div className="rounded-xl border-2 border-dashed border-slate-200 py-10 text-center">
+                <p className="text-sm font-bold text-slate-400">点击右上角「+ 添加」开始填写核心功能</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* ── Advantages + Scenario ── */}
+        <div className="grid gap-5 sm:grid-cols-2">
+          <div className="rounded-[1.5rem] border border-violet-100 bg-white p-6 shadow-sm transition-all focus-within:ring-4 focus-within:ring-violet-50">
+            <label className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-violet-600">✨ 核心优势</label>
+            <textarea value={d.advantages} onChange={(e) => handleChange('advantages', e.target.value)}
+              className="mt-3 h-28 w-full resize-none border-none bg-transparent text-sm font-medium leading-6 text-slate-700 outline-none placeholder:font-medium placeholder:text-slate-300 focus:ring-0"
+              placeholder="与竞品相比，差异化优势在哪里？" />
+          </div>
+          <div className="rounded-[1.5rem] border border-rose-100 bg-white p-6 shadow-sm transition-all focus-within:ring-4 focus-within:ring-rose-50">
+            <label className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-rose-600">📍 使用场景</label>
+            <textarea value={d.scenario} onChange={(e) => handleChange('scenario', e.target.value)}
+              className="mt-3 h-28 w-full resize-none border-none bg-transparent text-sm font-medium leading-6 text-slate-700 outline-none placeholder:font-medium placeholder:text-slate-300 focus:ring-0"
+              placeholder="描述典型使用情境：谁在什么情况下如何使用？" />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

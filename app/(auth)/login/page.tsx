@@ -34,25 +34,25 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="rounded-[2rem] border border-white/70 bg-white/90 p-8 shadow-2xl shadow-slate-200/80 backdrop-blur">
+    <div className="df-card df-elevated rounded-[22px] p-7 sm:p-8">
       <div className="mb-6">
-        <Link href="/" className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 active:translate-y-0 focus-visible:ring-4 focus-visible:ring-blue-100">
+        <Link href="/" className="inline-flex items-center gap-2 rounded-full border border-[#1e293b] bg-[#0f172a] px-4 py-2 text-sm font-semibold text-[#64748b] outline-none transition hover:-translate-y-0.5 hover:bg-[#1e293b] hover:text-[#f1f5f9] active:translate-y-0 focus-visible:ring-4 focus-visible:ring-[#3b82f6]/15">
           <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
           返回主页
         </Link>
       </div>
 
       <div className="mb-8 text-center">
-        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-sm font-black text-white shadow-lg shadow-blue-500/25">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-[#0f172a] text-sm font-bold text-[#f1f5f9]">
           DF
         </div>
-        <h1 className="text-3xl font-black tracking-tight text-slate-950">欢迎回来</h1>
-        <p className="mt-2 text-sm text-slate-500">登录您的 DesignFlow AI 账户</p>
+        <h1 className="text-3xl font-bold tracking-tight text-[#f1f5f9]">欢迎回来</h1>
+        <p className="mt-2 text-sm text-[#64748b]">登录你的 DesignFlow AI 工作台</p>
       </div>
 
       <form onSubmit={handleLogin} className="space-y-5">
         <div>
-          <label htmlFor="email" className="mb-2 block text-sm font-semibold text-slate-700">
+          <label htmlFor="email" className="mb-2 block text-sm font-semibold text-[#475569]">
             邮箱地址
           </label>
           <input
@@ -61,13 +61,13 @@ export default function LoginPage() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-medium text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            className="w-full rounded-xl border border-[#1e293b] bg-[#0f172a] px-4 py-3 font-medium text-[#f1f5f9] outline-none transition focus:border-[#3b82f6] focus:bg-[#1e293b] focus:ring-4 focus:ring-[#3b82f6]/15"
             placeholder="请输入邮箱"
           />
         </div>
 
         <div>
-          <label htmlFor="password" className="mb-2 block text-sm font-semibold text-slate-700">
+          <label htmlFor="password" className="mb-2 block text-sm font-semibold text-[#475569]">
             密码
           </label>
           <input
@@ -76,13 +76,13 @@ export default function LoginPage() {
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-medium text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            className="w-full rounded-xl border border-[#1e293b] bg-[#0f172a] px-4 py-3 font-medium text-[#f1f5f9] outline-none transition focus:border-[#3b82f6] focus:bg-[#1e293b] focus:ring-4 focus:ring-[#3b82f6]/15"
             placeholder="请输入密码"
           />
         </div>
 
         {error && (
-          <div className="rounded-2xl border border-red-100 bg-red-50 p-3 text-sm font-medium text-red-700">
+          <div className="rounded-2xl border border-[#7f1d1d] bg-[#1f0f0f] p-3 text-sm font-medium text-[#f87171]">
             {error}
           </div>
         )}
@@ -90,15 +90,15 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={loading}
-          className="w-full rounded-full bg-blue-600 px-5 py-3 font-bold text-white shadow-lg shadow-blue-600/25 outline-none transition hover:-translate-y-0.5 hover:bg-blue-700 active:translate-y-0 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:bg-blue-300 disabled:shadow-none disabled:hover:translate-y-0"
+          className="w-full rounded-full bg-[#3b82f6] px-5 py-3 font-bold text-white outline-none transition hover:-translate-y-0.5 hover:bg-[#60a5fa] active:translate-y-0 focus-visible:ring-4 focus-visible:ring-[#3b82f6]/20 disabled:bg-[#1e3a5f] disabled:hover:translate-y-0"
         >
           {loading ? '登录中...' : '登录'}
         </button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-slate-600">
+      <p className="mt-6 text-center text-sm text-[#64748b]">
         还没有账户？{' '}
-        <Link href="/signup" className="font-bold text-blue-600 hover:text-blue-700">
+        <Link href="/signup" className="font-bold text-[#3b82f6] hover:text-[#60a5fa]">
           立即注册
         </Link>
       </p>

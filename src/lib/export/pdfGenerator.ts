@@ -1,641 +1,692 @@
-import { jsPDF } from 'jspdf';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import pdfMake from 'pdfmake/build/pdfmake';
+import type { Content, TDocumentDefinitions } from 'pdfmake/build/pdfmake';
 import type { Database } from '@/types/database';
 
-// ── Cloudflare-compatible helpers ──────────────────────────────
+// ── Image safety ─────────────────────────────────────────────────
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  const CHUNK = 8192;
-  const parts: string[] = [];
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    parts.push(String.fromCharCode(...bytes.slice(i, i + CHUNK)));
-  }
-  return btoa(parts.join(''));
-}
-
-let _fontBase64: string | null = null;
-
-async function loadFontBase64(): Promise<string> {
-  if (_fontBase64) return _fontBase64;
-  const res = await fetch('/fonts/simhei.ttf');
-  if (!res.ok) throw new Error(`Font fetch failed: ${res.status}`);
-  _fontBase64 = arrayBufferToBase64(await res.arrayBuffer());
-  return _fontBase64;
-}
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB per image
+const MAX_TOTAL_IMAGE_BYTES = 40 * 1024 * 1024; // 40 MB total
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const IMAGE_FETCH_TIMEOUT = 5000; // 5 seconds per image
 
 type ProjectRow = Database['public']['Tables']['projects']['Row'];
-type Rgb = readonly [number, number, number];
-type ImageData = { dataUrl: string; format: 'JPEG' | 'PNG' };
 
-// ── Page geometry ───────────────────────────────────────────────
-const PAGE_W = 210;
-const PAGE_H = 297;
-const MARGIN = 18;
-const CW = PAGE_W - MARGIN * 2;           // content width
-const HEADER_Y = 13;
-const CONTENT_TOP = 28;
-const CONTENT_BOT = 274;
-const FOOTER_Y = 289;
-const FONT_NAME = 'SimHei';
-const LINE_H = 0.62; // Chinese-friendly line-height
+const imageCache = new Map<string, string>();
+let totalImageBytes = 0;
 
-// ── Color palette (modern, professional) ────────────────────────
-const INK    = [15,  23,  42]  as const; // #0F172A — titles
-const BODY   = [51,  65,  85]  as const; // #334155 — body
-const MUTED  = [100, 116, 139] as const; // #64748B — captions
-const BORDER = [226, 232, 240] as const; // #E2E8F0 — card borders
-const SURFACE= [248, 250, 252] as const; // #F8FAFC — card bg
-const INDIGO = [99,  102, 241] as const; // #6366F1 — primary accent
-const EMERALD= [16,  185, 129] as const; // #10B981 — success
-const AMBER  = [245, 158, 11]  as const; // #F59E0B — warning/highlight
-const ROSE   = [244, 63,  94]  as const; // #F43F5E — secondary accent
-const WHITE  = [255, 255, 255] as const;
-
-// ── Helpers ─────────────────────────────────────────────────────
-
-function text(value: unknown): string {
-  return String(value ?? '')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+/g, ' ')
-    .trim();
+function resetImageBytesCounter() {
+  totalImageBytes = 0;
 }
 
-function hexToRgb(hex: unknown, fallback = '#FFFFFF') {
-  const v = text(hex) || fallback;
-  const n = /^#?[0-9a-fA-F]{6}$/.test(v) ? v.replace('#', '') : fallback.replace('#', '');
-  return { r: parseInt(n.slice(0, 2), 16), g: parseInt(n.slice(2, 4), 16), b: parseInt(n.slice(4, 6), 16) };
+async function fetchImageBase64(url: string): Promise<string | null> {
+  const cached = imageCache.get(url);
+  if (cached) return cached;
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(IMAGE_FETCH_TIMEOUT),
+      redirect: 'error', // 拒绝重定向（防止 SSRF 跳转绕过白名单）
+    });
+    if (!res.ok) return null;
+
+    // 校验 Content-Type
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (!ALLOWED_IMAGE_TYPES.some((t) => ct.startsWith(t))) {
+      console.warn(`PDF 导出拒绝非图片响应: ${ct} from ${url}`);
+      return null;
+    }
+
+    // 预检 Content-Length
+    const contentLength = Number(res.headers.get('content-length') || 0);
+    if (contentLength > MAX_IMAGE_BYTES) {
+      console.warn(`PDF 导出图片过大(content-length): ${contentLength} bytes from ${url}`);
+      return null;
+    }
+
+    const ab = await res.arrayBuffer();
+    if (ab.byteLength > MAX_IMAGE_BYTES) {
+      console.warn(`PDF 导出图片过大(actual): ${ab.byteLength} bytes from ${url}`);
+      return null;
+    }
+
+    // 累计大小限制
+    totalImageBytes += ab.byteLength;
+    if (totalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
+      throw new Error('导出图片总大小超过限制');
+    }
+
+    const bytes = new Uint8Array(ab);
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.slice(i, i + 8192)));
+    }
+    const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'jpeg' : 'jpeg';
+    const dataUrl = `data:image/${ext};base64,${btoa(chunks.join(''))}`;
+    imageCache.set(url, dataUrl);
+    return dataUrl;
+  } catch (e: any) {
+    if (e.message?.includes('总大小超过限制')) throw e; // 向上传播
+    return null;
+  }
 }
 
-function h(lines: number, fontSize: number): number {
-  return Math.max(1, lines) * fontSize * LINE_H;
+// ── Font loading ─────────────────────────────────────────────────
+
+let fontLoaded = false;
+
+function ensureFont() {
+  if (fontLoaded) return;
+  try {
+    const fontPath = join(process.cwd(), 'public', 'fonts', 'simhei.ttf');
+    const buffer = readFileSync(fontPath);
+    const b64 = buffer.toString('base64');
+
+    // pdfmake 0.3.x uses addFontContainer (vfs + fonts together)
+    pdfMake.addFontContainer({
+      vfs: { 'simhei.ttf': b64 },
+      fonts: {
+        SimHei: { normal: 'simhei.ttf', bold: 'simhei.ttf', italics: 'simhei.ttf', bolditalics: 'simhei.ttf' },
+      },
+    });
+  } catch (e) {
+    console.warn('Chinese font load failed:', e);
+  }
+  fontLoaded = true;
+}
+
+// ── Design tokens ────────────────────────────────────────────────
+
+const INK = '#0F172A';
+const BODY = '#475569';
+const MUTED = '#64748B';
+const BORDER = '#E2E8F0';
+const SURFACE = '#F8FAFC';
+const INDIGO = '#6366F1';
+const EMERALD = '#10B981';
+const AMBER = '#F59E0B';
+const ROSE = '#F43F5E';
+const SLATE100 = '#F1F5F9';
+
+const FONT = 'SimHei';
+const BASE_FS = 10;
+const LH = 1.35;
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+function t(v: unknown): string {
+  return String(v ?? '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim();
+}
+
+function clampText(text: string, maxLen = 300): string {
+  const clean = t(text);
+  if (!clean) return '暂无内容';
+  if (clean.length <= maxLen) return clean;
+  return clean.slice(0, maxLen) + '…';
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function safeHex(value: unknown, fallback = '#CBD5E1'): string {
+  const raw = t(value).replace('#', '');
+  if (/^[0-9a-fA-F]{6}$/.test(raw)) return `#${raw.toUpperCase()}`;
+  if (/^[0-9a-fA-F]{3}$/.test(raw)) {
+    return `#${raw.split('').map((c) => c + c).join('').toUpperCase()}`;
+  }
+  return fallback;
+}
+
+function assertFinitePdfNumbers(node: unknown, path = 'docDefinition') {
+  if (typeof node === 'number') {
+    if (!Number.isFinite(node)) throw new Error(`PDF 导出数据包含无效数字: ${path}`);
+    return;
+  }
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    node.forEach((item, index) => assertFinitePdfNumbers(item, `${path}[${index}]`));
+    return;
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (typeof value !== 'function') assertFinitePdfNumbers(value, `${path}.${key}`);
+  }
+}
+
+
+// ── Building blocks ──────────────────────────────────────────────
+
+/** Section title + accent bar */
+function sectionBlock(title: string, subtitle?: string): Content[] {
+  const blocks: Content[] = [
+    { text: t(title), style: 'sectionTitle', margin: [0, 0, 0, 6] },
+    { canvas: [{ type: 'rect', x: 0, y: 0, w: 36, h: 1.5, r: 0.75, color: INDIGO }], margin: [0, 0, 0, subtitle ? 8 : 10] },
+  ];
+  if (subtitle) {
+    blocks.push(
+      { text: t(subtitle), style: 'subtitle', margin: [0, 0, 0, 12] },
+    );
+  }
+  return blocks;
+}
+
+/** Card with left accent bar */
+function card(label: string, body: string, accent = INDIGO): Content {
+  const val = t(body);
+  if (!val) return null;
+  return {
+    table: {
+      widths: [2.5, '*'],
+      body: [[
+        { text: '', fillColor: accent, margin: [0, 0, 0, 0] } satisfies any,
+        {
+          stack: [
+            { text: t(label), style: 'cardLabel' },
+            { text: clampText(val, 400), style: 'cardBody', margin: [0, 3, 0, 0] },
+          ],
+          margin: [9, 7.5, 8, 7.5],
+          fillColor: SURFACE,
+        } satisfies any,
+      ]],
+    },
+    layout: {
+      defaultBorder: false,
+      fillColor: () => SURFACE,
+      hLineWidth: () => 1,
+      vLineWidth: () => 0,
+      hLineColor: () => BORDER,
+    } as any,
+    margin: [0, 0, 0, 8],
+    unbreakable: true,
+  };
+}
+
+/** Note card with round dot */
+function noteCard(label: string, body: string, accent = INDIGO): Content {
+  const val = t(body);
+  if (!val) return null;
+  return {
+    table: {
+      widths: [2.5, '*'],
+      body: [[
+        { text: '', fillColor: accent, margin: [0, 0, 0, 0] } satisfies any,
+        {
+          stack: [
+            {
+              columns: [
+                { width: 4, canvas: [{ type: 'ellipse', x: 0, y: 0, w: 8, h: 8, r: 4, color: accent }] },
+                { width: '*', text: t(label), style: 'cardLabel', margin: [0, 1.5, 0, 0] },
+              ],
+              columnGap: 5,
+            },
+            { text: val, style: 'cardBody', margin: [0, 5, 0, 0] },
+          ],
+          margin: [9, 7.5, 8, 7.5],
+          fillColor: SURFACE,
+        } satisfies any,
+      ]],
+    },
+    layout: {
+      defaultBorder: false,
+      fillColor: () => SURFACE,
+      hLineWidth: () => 1,
+      vLineWidth: () => 0,
+      hLineColor: () => BORDER,
+    } as any,
+    margin: [0, 0, 0, 8],
+    unbreakable: true,
+  };
+}
+
+/** Numbered bullet list */
+function bulletList(items: string[]): Content {
+  const clean = items.map(t).filter(Boolean);
+  if (!clean.length) return null;
+  return {
+    ul: clean.map((item, i) => ({
+      text: item,
+      style: 'body',
+      margin: [0, 0, 0, 4],
+    })),
+    margin: [0, 4, 0, 8],
+  };
+}
+
+/** Label + custom content */
+function labelBlock(label: string, child: unknown): Content {
+  return {
+    stack: [
+      { text: t(label), style: 'label', margin: [0, 0, 0, 4] },
+      child,
+    ],
+    margin: [0, 6, 0, 4],
+  };
+}
+
+/** Persona section */
+function personaSection(persona: any, index: number): Content {
+  const name = t(persona.name) || `用户 ${index + 1}`;
+  const age = t(persona.age);
+  const occupation = t(persona.occupation);
+  const meta = [age && `${age}岁`, occupation].filter(Boolean).join(' · ');
+  const initials = name.slice(0, 2);
+  const ACCENTS = [INDIGO, EMERALD, AMBER, ROSE, '#3B82F6', '#A855F7'];
+  const accent = ACCENTS[index % ACCENTS.length]!;
+
+  const pieces: Content = [
+    // Avatar + name row
+    {
+      columns: [
+        {
+          width: 28,
+          stack: [
+            { canvas: [{ type: 'ellipse', x: 0, y: 0, w: 27, h: 27, r: 13.5, color: accent }] },
+            { text: initials, style: 'personaInitials', alignment: 'center', margin: [0, -20, 0, 0] },
+          ],
+        },
+        {
+          width: '*',
+          stack: [
+            { text: name, style: 'personaName' },
+            meta ? { text: meta, style: 'tiny', margin: [0, 1, 0, 0] } : null,
+          ].filter(Boolean),
+        },
+      ],
+      columnGap: 12,
+      margin: [0, 0, 0, 14],
+    },
+  ];
+
+  [
+    ['需  求', persona.needs, INDIGO],
+    ['痛  点', persona.pain_points, AMBER],
+    ['场  景', persona.scenario, EMERALD],
+  ].forEach(([l, v, c]) => {
+    const n = noteCard(l as string, v as string, c as string);
+    if (n) pieces.push(n);
+  });
+
+  return { stack: pieces, unbreakable: true, margin: [0, 0, 0, 16] };
+}
+
+/** Image grid (3 columns, equal width) */
+function imageGrid(images: string[], capPrefix: string): Content {
+  if (!images.length) return null;
+  const rows: Content = [];
+  const imgW = 155; // image width — columns auto-distribute
+
+  for (let i = 0; i < Math.min(images.length, 9); i += 3) {
+    const row = images.slice(i, i + 3);
+    const cols: Content = row.map((url, ci) => ({
+      width: '*',
+      stack: [
+        { image: url, width: imgW, height: imgW * 0.68, fit: [imgW, imgW * 0.68] },
+        { text: `${capPrefix} ${i + ci + 1}`, style: 'caption', alignment: 'center', margin: [0, 3, 0, 0] },
+      ],
+    }));
+    rows.push({ columns: cols, columnGap: 8, margin: [0, 0, 0, 14] });
+  }
+  return { stack: rows };
+}
+
+/** Storyboard grid (3 columns, equal width) */
+function storyboardGrid(images: any[]): Content {
+  if (!images.length) return null;
+  const rows: Content = [];
+  const imgW = 155;
+
+  for (let i = 0; i < images.length; i += 3) {
+    const row = images.slice(i, i + 3);
+    const cols = row.map((img) => ({
+      width: '*',
+      stack: [
+        { image: img.url, width: imgW, height: imgW * 0.58, fit: [imgW, imgW * 0.58] },
+        { text: t(img.description), style: 'caption', alignment: 'center', margin: [0, 3, 0, 0] },
+      ],
+    }));
+    rows.push({ columns: cols, columnGap: 8, margin: [0, 0, 0, 14] });
+  }
+  return { stack: rows };
+}
+
+/** CMF swatches */
+function cmfSection(cmf: any): Content {
+  const pieces: Content = [];
+
+  const primaryHex = safeHex(cmf.primary_color_hex || '#000000');
+  const secondaryHex = safeHex(cmf.secondary_color_hex || '#FFFFFF');
+
+  // Two color swatches side by side
+  pieces.push({
+    columns: [
+      swatchCard('主色', cmf.primary_color, primaryHex, 0),
+      swatchCard('辅色', cmf.secondary_color, secondaryHex, 1),
+    ],
+    columnGap: 10,
+    margin: [0, 0, 0, 10],
+  });
+
+  if (cmf.material) {
+    const m = noteCard('材  料', cmf.material, EMERALD);
+    if (m) pieces.push(m);
+  }
+  if (cmf.surface_treatment) {
+    const st = noteCard('表面处理', cmf.surface_treatment, AMBER);
+    if (st) pieces.push(st);
+  }
+
+  return { stack: pieces };
+}
+
+function swatchCard(label: string, name: string, hex: string, _idx: number): Content {
+  return {
+    table: {
+      widths: [2.5, '*'],
+      body: [[
+        { text: '', fillColor: INDIGO, margin: [0, 0, 0, 0] } satisfies any,
+        {
+          stack: [
+            { canvas: [{ type: 'rect', x: 0, y: 0, w: 52, h: 52, r: 5, color: hex }] },
+            { text: `${label}：${t(name) || '未命名'}`, style: 'cardLabel', margin: [0, 8, 0, 0] },
+            { text: hex, style: 'tiny', margin: [0, 2, 0, 0] },
+          ],
+          margin: [9, 7.5, 8, 7.5],
+          fillColor: SURFACE,
+        } satisfies any,
+      ]],
+    },
+    layout: {
+      defaultBorder: false,
+      fillColor: () => SURFACE,
+      hLineWidth: () => 1,
+      vLineWidth: () => 0,
+      hLineColor: () => BORDER,
+    } as any,
+    unbreakable: true,
+  };
+}
+
+/** Hero image (exploded view) */
+function heroImage(url: string): Content {
+  return { image: url, width: 440, alignment: 'center', margin: [0, 10, 0, 0] };
+}
+
+// ── Cover page ──────────────────────────────────────────────────
+
+function buildCover(title: string, tagline: string): Content {
+  return {
+    stack: [
+      // Decorative circles
+      {
+        canvas: [
+          { type: 'ellipse', x: 415, y: 20, w: 170, h: 170, r: 85, color: SLATE100 },
+          { type: 'ellipse', x: 430, y: 38, w: 120, h: 120, r: 60, color: SURFACE },
+        ],
+        absolutePosition: { x: 0, y: 0 },
+      },
+      // Top brand
+      { text: 'DESIGNFLOW AI', style: 'brandLabel', margin: [0, 140, 0, 0] },
+      { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 493, y2: 0, lineWidth: 0.5, lineColor: BORDER }], margin: [0, 6, 0, 0] },
+      // Title
+      { text: t(title), style: 'coverTitle', margin: [0, 110, 0, 0] },
+      // Tagline
+      { text: t(tagline), style: 'coverSubtitle', margin: [0, 18, 0, 0] },
+      // Accent bar
+      { canvas: [{ type: 'rect', x: 0, y: 0, w: 60, h: 3, r: 1.5, color: INDIGO }], margin: [0, 28, 0, 0] },
+      // Info block
+      { text: '产品设计方案', style: 'coverDocType', margin: [0, 36, 0, 0] },
+      { text: '背景研究 / 用户画像 / 外观设计 / CMF / 故事板 / 爆炸图', style: 'coverMeta', margin: [0, 8, 0, 0] },
+      // Bottom line
+      { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 493, y2: 0, lineWidth: 0.5, lineColor: BORDER }], margin: [0, 162, 0, 0] },
+      { text: `生成时间：${new Date().toLocaleDateString('zh-CN')}`, style: 'coverDate' },
+    ],
+    pageBreak: 'after',
+  };
+}
+
+// ── Table of Contents ───────────────────────────────────────────
+
+function buildToc(entries: { num: string; name: string }[]): Content {
+  return {
+    stack: [
+      ...sectionBlock('目  录', '报告内容结构'),
+      ...entries.map((e) => ({
+        columns: [
+          {
+            width: 26,
+            stack: [
+              { canvas: [{ type: 'rect', x: 0, y: 0, w: 22, h: 11, r: 3, color: INDIGO }], margin: [0, 2, 0, 0] },
+              { text: e.num, style: 'tocNumber', alignment: 'center', margin: [0, -11, 4, 0] },
+            ],
+          },
+          { width: '*', text: e.name, style: 'tocTitle', margin: [8, 0, 0, 0] },
+        ],
+        columnGap: 0,
+        margin: [0, 0, 0, 4],
+      })),
+      ...entries.map(() =>
+        ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: 493, y2: 0, lineWidth: 0.3, lineColor: BORDER }], margin: [0, 0, 0, 6] })
+      ),
+    ],
+    pageBreak: 'after',
+  };
 }
 
 // ── Main generator ──────────────────────────────────────────────
 
-export async function generatePDF(project: ProjectRow, includeSections?: Record<string, boolean>): Promise<Uint8Array> {
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  const fontOk = await registerFont(doc);
-  let y = CONTENT_TOP;
-  let sectionTitle = '设计方案';
+export async function generatePDF(
+  project: ProjectRow,
+  includeSections?: Record<string, boolean>,
+): Promise<Uint8Array> {
+  ensureFont();
+  resetImageBytesCounter();
 
   const intro = project.product_intro as any;
   const personas = ((project.personas as any[]) || []).filter(Boolean);
   const cmf = project.cmf as any;
   const appearanceImages = ((project.appearance_images as string[]) || []).filter(Boolean);
   const storyboardImages = ((project.storyboard_images as any[]) || []).filter((i: any) => i?.url);
-  const title = text(intro?.name) || text(project.idea) || '设计方案';
-  const tagline = text(intro?.tagline) || 'AI 产品设计方案';
+  const title = t(intro?.name) || t(project.idea) || '设计方案';
+  const tagline = t(intro?.tagline) || 'AI 产品设计方案';
 
-  const include = includeSections || {
-    background: true, product_intro: true, personas: true,
-    appearance: true, cmf: true, storyboard: true, exploded_view: true,
+  const include = includeSections ?? {
+    background: true,
+    product_intro: true,
+    personas: true,
+    appearance: true,
+    cmf: true,
+    storyboard: true,
+    exploded_view: true,
   };
 
-  // ── Drawing shortcuts ─────────────────────────────────────────
-
-  const sf = (bold = false) => { if (fontOk) doc.setFont(FONT_NAME, bold ? 'bold' : 'normal'); };
-  const tc = (c: Rgb) => doc.setTextColor(...c);
-  const fc = (c: Rgb) => doc.setFillColor(...c);
-  const dc = (c: Rgb) => doc.setDrawColor(...c);
-
-  const wrap = (content: string, w: number, max?: number): string[] => {
-    const ls = doc.splitTextToSize(text(content), w) as string[];
-    if (!max || ls.length <= max) return ls;
-    const clip = ls.slice(0, max);
-    clip[clip.length - 1] = clip[clip.length - 1].replace(/…$/, '') + '…';
-    return clip;
-  };
-
-  // ── Page management ───────────────────────────────────────────
-
-  const newPage = () => { doc.addPage(); drawHeader(); y = CONTENT_TOP; };
-
-  const ensure = (need: number) => {
-    if (y + need > CONTENT_BOT && y > CONTENT_TOP + 10) newPage();
-    if (y + need > CONTENT_BOT) newPage();
-  };
-
-  // ── Header / Footer ───────────────────────────────────────────
-
-  const drawHeader = () => {
-    dc(BORDER); doc.setLineWidth(0.3);
-    doc.line(MARGIN, HEADER_Y, PAGE_W - MARGIN, HEADER_Y);
-    sf(true); doc.setFontSize(8); tc(INK);
-    doc.text('DesignFlow AI', MARGIN, 9.5);
-    sf(); doc.setFontSize(7.5); tc(MUTED);
-    doc.text(sectionTitle, PAGE_W - MARGIN, 9.5, { align: 'right' });
-  };
-
-  const drawFooters = () => {
-    const total = doc.getNumberOfPages();
-    for (let i = 1; i <= total; i++) {
-      doc.setPage(i);
-      sf(); doc.setFontSize(7.5); tc(MUTED);
-      doc.text(`${i} / ${total}`, MARGIN, FOOTER_Y);
-      doc.text('Generated by DesignFlow AI', PAGE_W - MARGIN, FOOTER_Y, { align: 'right' });
-    }
-  };
-
-  // ── Section title ─────────────────────────────────────────────
-
-  const addSection = (name: string, subtitle?: string) => {
-    sectionTitle = name;
-    const need = subtitle ? 34 : 24;
-    ensure(need);
-    y += 1;
-
-    sf(true); doc.setFontSize(18); tc(INK);
-    doc.text(text(name), MARGIN, y);
-
-    // Dual-color accent bar
-    fc(INDIGO);
-    doc.roundedRect(MARGIN, y + 4.5, 14, 1.2, 0.6, 0.6, 'F');
-    fc(BORDER);
-    doc.roundedRect(MARGIN + 15.5, y + 4.5, CW - 15.5, 1.2, 0.6, 0.6, 'F');
-    y += 12;
-
-    if (subtitle) {
-      sf(); doc.setFontSize(9); tc(MUTED);
-      doc.text(text(subtitle), MARGIN, y);
-      y += 9;
-    }
-  };
-
-  // ── Body card (paginated, for long content) ───────────────────
-
-  const addBodyCard = (content: string, accent: Rgb = INDIGO, label?: string) => {
-    const val = text(content);
-    if (!val) return;
-
-    const fs = 10;
-    const lh = fs * LINE_H;
-    const tw = CW - 16;
-    const allLines = wrap(val, tw);
-    const maxCardH = CONTENT_BOT - CONTENT_TOP - 10;
-    const hdrH = label ? 12 : 6;
-
-    let first = true;
-    const paras = splitParas(allLines);
-
-    for (const pl of paras) {
-      const ch = hdrH + h(pl.length, fs) + 10;
-      if (ch <= maxCardH) {
-        ensure(ch + 6);
-        drawBodyChunk({ lines: pl, accent, label: first ? label : undefined, fs, lh, tw, ch, hdrH });
-        first = false;
-      } else {
-        const avail = maxCardH - hdrH - 10;
-        const perChunk = Math.max(3, Math.floor(avail / lh));
-        let li = 0;
-        while (li < pl.length) {
-          const chunk = pl.slice(li, li + perChunk);
-          const h2 = hdrH + h(chunk.length, fs) + 10;
-          ensure(h2 + 6);
-          drawBodyChunk({ lines: chunk, accent, label: first ? label : `${label || ''}（续）`, fs, lh, tw, ch: h2, hdrH });
-          first = false;
-          li += chunk.length;
-        }
-      }
-    }
-  };
-
-  const drawBodyChunk = (o: { lines: string[]; accent: Rgb; label?: string; fs: number; lh: number; tw: number; ch: number; hdrH: number }) => {
-    const top = y;
-
-    // Card bg + border
-    fc(SURFACE);
-    doc.roundedRect(MARGIN, top, CW, o.ch, 3, 3, 'F');
-    dc(BORDER); doc.setLineWidth(0.4);
-    doc.roundedRect(MARGIN, top, CW, o.ch, 3, 3, 'S');
-
-    // Accent left bar
-    fc(o.accent);
-    doc.roundedRect(MARGIN, top, 3, o.ch, 1.5, 1.5, 'F');
-
-    const tx = MARGIN + 9;
-
-    if (o.label) {
-      sf(true); doc.setFontSize(10); tc(INK);
-      doc.text(text(o.label), tx, top + 8.5);
-    }
-
-    sf(); doc.setFontSize(o.fs); tc(BODY);
-    doc.text(o.lines, tx, top + o.hdrH + 2);
-    y += o.ch + 6;
-  };
-
-  const splitParas = (lines: string[]): string[][] => {
-    const r: string[][] = [];
-    let cur: string[] = [];
-    for (const l of lines) {
-      if (l.trim() === '' && cur.length > 0) { r.push(cur); cur = []; }
-      else if (l.trim() !== '') cur.push(l);
-    }
-    if (cur.length > 0) r.push(cur);
-    return r.length > 0 ? r : [lines];
-  };
-
-  // ── Note card (needs / pain points / scenario) ────────────────
-
-  const addNoteCard = (label: string, body: string, accent: Rgb = INDIGO) => {
-    const val = text(body);
-    if (!val) return;
-
-    const fs = 9.5;
-    const lh = fs * LINE_H;
-    const tw = CW - 16;
-    const allLines = wrap(val, tw);
-    const maxCardH = CONTENT_BOT - CONTENT_TOP - 10;
-    const hdrH = 11;
-    const cardH = Math.min(maxCardH, hdrH + h(allLines.length, fs) + 10);
-
-    if (cardH <= maxCardH) {
-      ensure(cardH + 6);
-      drawNoteChunk({ label, lines: allLines, accent, fs, lh, tw, cardH, hdrH });
-    } else {
-      const perChunk = Math.max(2, Math.floor((maxCardH - hdrH - 10) / lh));
-      let li = 0;
-      while (li < allLines.length) {
-        const chunk = allLines.slice(li, li + perChunk);
-        const h2 = hdrH + h(chunk.length, fs) + 10;
-        ensure(h2 + 6);
-        drawNoteChunk({ label, lines: chunk, accent, fs, lh, tw, cardH: h2, hdrH });
-        li += chunk.length;
-      }
-    }
-  };
-
-  const drawNoteChunk = (o: { label: string; lines: string[]; accent: Rgb; fs: number; lh: number; tw: number; cardH: number; hdrH: number }) => {
-    const top = y;
-
-    fc(SURFACE);
-    doc.roundedRect(MARGIN, top, CW, o.cardH, 3, 3, 'F');
-    dc(BORDER); doc.setLineWidth(0.4);
-    doc.roundedRect(MARGIN, top, CW, o.cardH, 3, 3, 'S');
-    fc(o.accent);
-    doc.roundedRect(MARGIN, top, 3, o.cardH, 1.5, 1.5, 'F');
-
-    const tx = MARGIN + 9;
-
-    // Label with accent dot
-    fc(o.accent);
-    doc.circle(tx, top + 8.5, 2, 'F');
-    sf(true); doc.setFontSize(10); tc(INK);
-    doc.text(text(o.label), tx + 5, top + 12);
-
-    sf(); doc.setFontSize(o.fs); tc(BODY);
-    doc.text(o.lines, tx, top + o.hdrH + 8);
-    y += o.cardH + 6;
-  };
-
-  // ── Bullet list ───────────────────────────────────────────────
-
-  const addBullets = (items: string[]) => {
-    const clean = items.map(text).filter(Boolean);
-    if (!clean.length) return;
-
-    clean.forEach((item, i) => {
-      const ls = wrap(item, CW - 14, 4);
-      const blockH = Math.max(10, h(ls.length, 9.5) + 5);
-      ensure(blockH + 2);
-
-      // Number badge
-      fc(INDIGO);
-      doc.setFontSize(7.5);
-      tc(WHITE);
-      sf(true);
-      doc.text(String(i + 1), MARGIN + 4.5, y + 5.8, { align: 'center' });
-
-      sf(); doc.setFontSize(9.5); tc(BODY);
-      doc.text(ls, MARGIN + 11, y + 5.5);
-      y += blockH;
-    });
-    y += 3;
-  };
-
-  const addLabel = (label: string) => {
-    ensure(14);
-    sf(true); doc.setFontSize(12); tc(INK);
-    doc.text(text(label), MARGIN, y);
-    y += 8;
-  };
-
-  // ── Image helpers ─────────────────────────────────────────────
-
-  const addImageFrame = async (url: string, x: number, top: number, w: number, h: number) => {
-    fc(SURFACE); doc.roundedRect(x, top, w, h, 2.5, 2.5, 'F');
-    const img = await fetchImage(url);
-    if (img) doc.addImage(img.dataUrl, img.format, x, top, w, h);
-  };
-
-  const addImageGrid = async (images: string[], name: string, subtitle: string, capPrefix: string) => {
-    if (!images.length) return;
-    addSection(name, subtitle);
-
-    const gap = 6;
-    const colW = (CW - gap * 2) / 3;
-    const imgH = colW * 0.7;
-
-    for (let i = 0; i < Math.min(images.length, 9); i += 3) {
-      const rowH = imgH + 15;
-      ensure(rowH);
-      const top = y;
-      const row = images.slice(i, i + 3);
-
-      for (let col = 0; col < row.length; col++) {
-        const x = MARGIN + col * (colW + gap);
-        await addImageFrame(row[col], x, top, colW, imgH);
-
-        sf(); doc.setFontSize(7.5); tc(MUTED);
-        doc.text(`${capPrefix} ${i + col + 1}`, x + colW / 2, top + imgH + 6, { align: 'center' });
-      }
-      y += rowH;
-    }
-  };
-
-  // ── Storyboard ────────────────────────────────────────────────
-
-  const addStoryboard = async () => {
-    const gap = 6;
-    const colW = (CW - gap * 2) / 3;
-    const imgH = colW * 0.6;
-
-    for (let i = 0; i < storyboardImages.length; i += 3) {
-      const rowH = imgH + 24;
-      ensure(rowH);
-      const top = y;
-      const row = storyboardImages.slice(i, i + 3);
-
-      for (let col = 0; col < row.length; col++) {
-        const x = MARGIN + col * (colW + gap);
-        await addImageFrame(row[col].url, x, top, colW, imgH);
-
-        const capLs = wrap(text(row[col].description), colW, 3);
-        sf(); doc.setFontSize(7.2); tc(MUTED);
-        doc.text(capLs, x, top + imgH + 5.5, { align: 'left' });
-      }
-      y += rowH;
-    }
-  };
-
-  const addHeroImage = async (url: string) => {
-    const img = await fetchImage(url);
-    if (!img) return;
-    const mw = CW * 0.85;
-    const mh = 110;
-    const w = mw;
-    const h = Math.min(mh, w * 0.65);
-    ensure(h + 10);
-    const x = MARGIN + (CW - w) / 2;
-    doc.addImage(img.dataUrl, img.format, x, y, w, h);
-    y += h + 10;
-  };
-
-  // ── Persona ───────────────────────────────────────────────────
-
-  const PERSONA_COLORS: Rgb[] = [INDIGO, EMERALD, AMBER, ROSE, [59, 130, 246] as Rgb, [168, 85, 247] as Rgb];
-
-  const addPersona = (persona: any, index: number) => {
-    const name = text(persona.name) || `用户 ${index + 1}`;
-    const age = text(persona.age);
-    const occupation = text(persona.occupation);
-    const meta = [age && `${age}岁`, occupation].filter(Boolean).join(' · ');
-    const accent = PERSONA_COLORS[index % PERSONA_COLORS.length];
-    const initials = name.slice(0, 2);
-
-    const entries = [
-      ['需  求', persona.needs, INDIGO],
-      ['痛  点', persona.pain_points, AMBER],
-      ['场  景', persona.scenario, EMERALD],
-    ] as const;
-
-    ensure(32);
-
-    // Avatar circle + name + meta
-    fc(accent);
-    doc.circle(MARGIN + 8, y + 7, 8, 'F');
-    sf(true); doc.setFontSize(11); tc(WHITE);
-    doc.text(initials, MARGIN + 8, y + 10.5, { align: 'center' });
-
-    sf(true); doc.setFontSize(12); tc(INK);
-    doc.text(name, MARGIN + 20, y + 7.5);
-    if (meta) {
-      sf(); doc.setFontSize(8.5); tc(MUTED);
-      doc.text(meta, MARGIN + 20, y + 14.5);
-    }
-    y += 22;
-
-    entries.forEach(([label, value, color]) => {
-      if (!text(value)) return;
-      addNoteCard(label, value, color);
-    });
-  };
-
-  // ── CMF ───────────────────────────────────────────────────────
-
-  const addCmf = () => {
-    ensure(58);
-
-    const cardW = (CW - 8) / 2;
-    const swatches = [
-      ['主色', cmf.primary_color, cmf.primary_color_hex, hexToRgb(cmf.primary_color_hex, '#000000'), MARGIN],
-      ['辅色', cmf.secondary_color, cmf.secondary_color_hex, hexToRgb(cmf.secondary_color_hex, '#FFFFFF'), MARGIN + cardW + 8],
-    ] as const;
-
-    swatches.forEach(([label, colName, hex, rgb, x]) => {
-      fc(SURFACE);
-      doc.roundedRect(x, y, cardW, 42, 3, 3, 'F');
-      dc(BORDER); doc.setLineWidth(0.4);
-      doc.roundedRect(x, y, cardW, 42, 3, 3, 'S');
-
-      // Large color swatch
-      doc.setFillColor(rgb.r, rgb.g, rgb.b);
-      doc.roundedRect(x + 7, y + 7, 28, 28, 2.5, 2.5, 'F');
-      dc(BORDER); doc.setLineWidth(0.5);
-      doc.roundedRect(x + 7, y + 7, 28, 28, 2.5, 2.5, 'S');
-
-      sf(true); doc.setFontSize(10); tc(INK);
-      doc.text(`${label}：${text(colName) || '未命名'}`, x + 42, y + 16);
-      sf(); doc.setFontSize(8.5); tc(MUTED);
-      doc.text(text(hex), x + 42, y + 27);
-    });
-
-    y += 50;
-    if (cmf.material) addNoteCard('材  料', cmf.material, EMERALD);
-    if (cmf.surface_treatment) addNoteCard('表面处理', cmf.surface_treatment, AMBER);
-  };
-
-  // ── Cover page ────────────────────────────────────────────────
-
-  const addCover = () => {
-    fc(WHITE);
-    doc.rect(0, 0, PAGE_W, PAGE_H, 'F');
-
-    // Geometric decoration — subtle circles
-    fc([241, 245, 249]);
-    doc.circle(PAGE_W - 25, 45, 60, 'F');
-    fc([248, 250, 252]);
-    doc.circle(PAGE_W - 20, 50, 42, 'F');
-
-    // Top brand bar
-    sf(true); doc.setFontSize(9); tc(INDIGO);
-    doc.text('DESIGNFLOW AI', MARGIN, 26);
-
-    dc(BORDER); doc.setLineWidth(0.3);
-    doc.line(MARGIN, 32, PAGE_W - MARGIN, 32);
-    doc.line(MARGIN, 255, PAGE_W - MARGIN, 255);
-
-    // Title
-    sf(true); doc.setFontSize(28); tc(INK);
-    doc.text(wrap(title, CW - 20, 3), MARGIN, 78);
-
-    // Tagline
-    sf(); doc.setFontSize(12); tc(MUTED);
-    doc.text(wrap(tagline, CW * 0.75, 3), MARGIN, 114);
-
-    // Accent bars
-    fc(INDIGO);
-    doc.roundedRect(MARGIN, 138, 20, 2.2, 1.1, 1.1, 'F');
-    fc(BORDER);
-    doc.roundedRect(MARGIN + 23, 138, 90, 2.2, 1.1, 1.1, 'F');
-
-    // Info block
-    sf(true); doc.setFontSize(10); tc(INK);
-    doc.text('产品设计方案', MARGIN, 160);
-    sf(); doc.setFontSize(9); tc(MUTED);
-    doc.text('背景研究 / 用户画像 / 外观设计 / CMF / 故事板 / 爆炸图', MARGIN, 172);
-    doc.text(`生成时间：${new Date().toLocaleDateString('zh-CN')}`, MARGIN, 262);
-  };
-
-  // ── Table of Contents ─────────────────────────────────────────
-
-  const addToc = () => {
-    addSection('目  录', '报告内容结构');
-
-    const secs = [
-      ['01', '背景研究', include.background && Boolean(project.background)],
-      ['02', '产品介绍', include.product_intro && Boolean(intro)],
-      ['03', '用户画像', include.personas && personas.length > 0],
-      ['04', '外观设计', include.appearance && appearanceImages.length > 0],
-      ['05', 'CMF 方案', include.cmf && Boolean(cmf)],
-      ['06', '故事板', include.storyboard && storyboardImages.length > 0],
-      ['07', '爆炸图', include.exploded_view && Boolean(project.exploded_view_image)],
-    ].filter(([, , ok]) => ok);
-
-    secs.forEach(([num, name]) => {
-      ensure(17);
-      fc(INDIGO);
-      doc.roundedRect(MARGIN, y - 5, 22, 11, 3, 3, 'F');
-      sf(true); doc.setFontSize(9.5); tc(WHITE);
-      doc.text(String(num), MARGIN + 5, y + 2.2);
-
-      sf(true); doc.setFontSize(11); tc(INK);
-      doc.text(String(name), MARGIN + 26, y + 2);
-
-      dc(BORDER); doc.setLineWidth(0.3);
-      doc.line(MARGIN, y + 6, PAGE_W - MARGIN, y + 6);
-      y += 13;
-    });
-  };
-
-  // ── Build document ────────────────────────────────────────────
-
-  addCover();
-  doc.addPage();
-  sectionTitle = '目录';
-  drawHeader(); y = CONTENT_TOP;
-  addToc();
+  // Build section list for TOC
+  const sections: { num: string; name: string }[] = [];
+  if (include.background && project.background) sections.push({ num: '01', name: '背景研究' });
+  if (include.product_intro && intro) sections.push({ num: '02', name: '产品介绍' });
+  if (include.personas && personas.length) sections.push({ num: '03', name: '用户画像' });
+  if (include.appearance && appearanceImages.length) sections.push({ num: '04', name: '外观设计' });
+  if (include.cmf && cmf) sections.push({ num: '05', name: 'CMF 方案' });
+  if (include.storyboard && storyboardImages.length) sections.push({ num: '06', name: '故事板' });
+  if (include.exploded_view && project.exploded_view_image) sections.push({ num: '07', name: '爆炸图' });
+
+  const content: Content = [
+    buildCover(title, tagline),
+    buildToc(sections),
+  ];
 
   // 1. Background
   if (include.background && project.background) {
-    doc.addPage(); sectionTitle = '背景研究';
-    drawHeader(); y = CONTENT_TOP;
-    addSection('背景研究', '痛点、机会点与趋势分析');
-    addBodyCard(project.background, INDIGO, '研究内容');
+    content.push({
+      stack: [
+        ...sectionBlock('背景研究', '痛点、机会点与趋势分析'),
+        card('研究内容', project.background, INDIGO),
+      ],
+      pageBreak: 'before',
+    });
   }
 
   // 2. Product intro
   if (include.product_intro && intro) {
-    doc.addPage(); sectionTitle = '产品介绍';
-    drawHeader(); y = CONTENT_TOP;
-    addSection('产品介绍', '产品定位、核心功能与使用场景');
-    if (intro.name) addNoteCard('产品名称', text(intro.name) || '未命名产品', INDIGO);
-    if (intro.tagline) addNoteCard('定位语', intro.tagline, INDIGO);
-    if (intro.features?.length) {
-      addLabel('核心功能');
-      addBullets(intro.features);
+    const pieces: Content = [...sectionBlock('产品介绍', '产品定位、核心功能与使用场景')];
+    if (intro.name) {
+      const n = card('产品名称', intro.name || '未命名产品', INDIGO);
+      if (n) pieces.push(n);
     }
-    if (intro.scenario) addNoteCard('使用场景', intro.scenario, EMERALD);
+    if (intro.tagline) {
+      const tl = card('产品定位', intro.tagline, INDIGO);
+      if (tl) pieces.push(tl);
+    }
+    if (intro.features?.length) {
+      pieces.push({ text: '核心功能', style: 'label', margin: [0, 10, 0, 6] });
+      const bl = bulletList(intro.features);
+      if (bl) pieces.push(bl);
+    }
+    if (intro.scenario) {
+      const sc = noteCard('使用场景', intro.scenario, EMERALD);
+      if (sc) pieces.push(sc);
+    }
+    content.push({ stack: pieces, pageBreak: 'before' });
   }
 
   // 3. Personas
   if (include.personas && personas.length) {
-    doc.addPage(); sectionTitle = '用户画像';
-    drawHeader(); y = CONTENT_TOP;
-    addSection('用户画像', '目标用户、核心需求与使用场景');
-    personas.forEach((p, i) => addPersona(p, i));
+    const pieces: Content = [
+      ...sectionBlock('用户画像', '目标用户、核心需求与使用场景'),
+      ...personas.map((p, i) => personaSection(p, i)),
+    ];
+    content.push({ stack: pieces, pageBreak: 'before' });
   }
 
   // 4. Appearance
-  if (include.appearance) {
-    await addImageGrid(appearanceImages.slice(0, 9), '外观设计', '产品效果图与形态探索', '效果图');
+  if (include.appearance && appearanceImages.length) {
+    content.push({
+      stack: [
+        ...sectionBlock('外观设计', '产品效果图与形态探索'),
+        imageGrid(appearanceImages, '效果图'),
+      ].filter(Boolean),
+      pageBreak: 'before',
+    });
   }
 
   // 5. CMF
   if (include.cmf && cmf) {
-    doc.addPage(); sectionTitle = 'CMF 方案';
-    drawHeader(); y = CONTENT_TOP;
-    addSection('CMF 方案', '色彩、材料与表面处理');
-    addCmf();
+    content.push({
+      stack: [...sectionBlock('CMF 方案', '色彩、材料与表面处理'), cmfSection(cmf)].filter(Boolean),
+      pageBreak: 'before',
+    });
   }
 
   // 6. Storyboard
   if (include.storyboard && storyboardImages.length) {
-    doc.addPage(); sectionTitle = '故事板';
-    drawHeader(); y = CONTENT_TOP;
-    addSection('故事板', '产品使用流程与场景表达');
-    await addStoryboard();
+    content.push({
+      stack: [
+        ...sectionBlock('故事板', '产品使用流程与场景表达'),
+        storyboardGrid(storyboardImages),
+      ].filter(Boolean),
+      pageBreak: 'before',
+    });
   }
 
   // 7. Exploded view
   if (include.exploded_view && project.exploded_view_image) {
-    doc.addPage(); sectionTitle = '爆炸图';
-    drawHeader(); y = CONTENT_TOP;
-    addSection('爆炸图', '产品结构分解视图');
-    await addHeroImage(project.exploded_view_image);
+    content.push({
+      stack: [
+        ...sectionBlock('爆炸图', '产品结构分解视图'),
+        heroImage(project.exploded_view_image),
+      ],
+      pageBreak: 'before',
+    });
   }
 
-  drawFooters();
+  const docDef: TDocumentDefinitions = {
+    pageSize: 'A4',
+    pageMargins: [50, 50, 50, 50], // ~18mm each side
+    defaultStyle: { font: FONT, fontSize: BASE_FS, lineHeight: LH },
+    content,
+    styles: {
+      coverTitle: { fontSize: 28, bold: true, color: INK, font: FONT, lineHeight: 1.15 },
+      coverSubtitle: { fontSize: 12, color: MUTED, font: FONT },
+      coverDocType: { fontSize: 10, bold: true, color: INK, font: FONT },
+      coverMeta: { fontSize: 9, color: MUTED, font: FONT },
+      coverDate: { fontSize: 9, color: MUTED, font: FONT, margin: [0, 6, 0, 0] },
+      brandLabel: { fontSize: 9, bold: true, color: INDIGO, font: FONT },
+      sectionTitle: { fontSize: 18, bold: true, color: INK, font: FONT },
+      subtitle: { fontSize: 10, color: MUTED, font: FONT },
+      label: { fontSize: 13, bold: true, color: INK, font: FONT },
+      cardLabel: { fontSize: 10, bold: true, color: INK, font: FONT },
+      cardBody: { fontSize: 10, color: BODY, font: FONT, lineHeight: 1.4 },
+      body: { fontSize: 10, color: BODY, font: FONT, lineHeight: 1.4 },
+      caption: { fontSize: 7.5, color: MUTED, font: FONT },
+      tiny: { fontSize: 9, color: MUTED, font: FONT },
+      tocNumber: { fontSize: 9.5, bold: true, color: '#FFFFFF', font: FONT },
+      tocTitle: { fontSize: 11, bold: true, color: INK, font: FONT },
+      personaInitials: { fontSize: 11, bold: true, color: '#FFFFFF', font: FONT },
+      personaName: { fontSize: 12, bold: true, color: INK, font: FONT },
+    },
+    header: (currentPage: number, _pageCount: number, _pageSize: any) => {
+      if (currentPage === 1) return null;
+      return {
+        stack: [
+          {
+            columns: [
+              { text: 'DesignFlow AI', style: 'tiny', width: 'auto' },
+              { text: '设计方案', style: 'tiny', width: '*', alignment: 'right' },
+            ],
+          },
+          { canvas: [{ type: 'line' as const, x1: 0, y1: 0, x2: 493, y2: 0, lineWidth: 0.3, lineColor: BORDER }] },
+        ],
+        margin: [50, 30, 50, 0],
+      };
+    },
+    footer: (currentPage: number, pageCount: number, _pageSize: any) => {
+      if (pageCount <= 1 || currentPage === 1) return null; // no footer on cover
+      return {
+        columns: [
+          { text: `${currentPage} / ${pageCount}`, style: 'caption', width: 'auto' },
+          { text: 'Generated by DesignFlow AI', style: 'caption', width: '*', alignment: 'right' },
+        ],
+        margin: [50, 0, 50, 30],
+      };
+    },
+    images: {} as Record<string, string>,
+  };
 
-  const buf = doc.output('arraybuffer');
-  return new Uint8Array(buf);
-}
+  // Fetch all images and build URL→base64 map
+  const imgMap: Record<string, string> = {};
 
-// ── Font / Image loading ────────────────────────────────────────
+  const urlsToFetch = [
+    ...appearanceImages,
+    ...storyboardImages.map((img: any) => img.url),
+    project.exploded_view_image,
+  ].filter((u): u is string => Boolean(u));
 
-async function registerFont(doc: jsPDF): Promise<boolean> {
-  try {
-    const b64 = await loadFontBase64();
-    doc.addFileToVFS('simhei.ttf', b64);
-    doc.addFont('simhei.ttf', FONT_NAME, 'normal');
-    doc.addFont('simhei.ttf', FONT_NAME, 'bold');
-    doc.setFont(FONT_NAME, 'normal');
-    return true;
-  } catch (e) {
-    console.warn('Chinese font load failed:', e);
-    return false;
+  await Promise.all(
+    urlsToFetch.map(async (url) => {
+      const b64 = await fetchImageBase64(url);
+      if (b64) imgMap[url] = b64;
+    }),
+  );
+
+  // Replace image URLs with base64 in the content
+  function replaceImages(nodes: any): any {
+    if (!nodes || typeof nodes !== 'object') return nodes;
+    if (Array.isArray(nodes)) return nodes.map(replaceImages);
+    if (nodes.image && typeof nodes.image === 'string' && imgMap[nodes.image]) {
+      return { ...nodes, image: imgMap[nodes.image] };
+    }
+    const result: Record<string, any> = {};
+    for (const [k, v] of Object.entries(nodes)) {
+      result[k] = replaceImages(v);
+    }
+    return result;
   }
-}
+  const finalContent = replaceImages(content);
 
-async function fetchImage(url: string): Promise<ImageData | null> {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-    const ct = res.headers.get('content-type') || '';
-    const fmt: ImageData['format'] = ct.includes('png') ? 'PNG' : 'JPEG';
-    const ab = await res.arrayBuffer();
-    const b64 = arrayBufferToBase64(ab);
-    return { dataUrl: `data:image/${fmt.toLowerCase()};base64,${b64}`, format: fmt };
-  } catch { return null; }
+  const pdfInput = { ...docDef, content: finalContent };
+  assertFinitePdfNumbers(pdfInput);
+  const pdfDoc = pdfMake.createPdf(pdfInput);
+
+  // pdfmake 0.3.x getBuffer() returns Promise<Buffer>, not callback-based
+  const buffer = await pdfDoc.getBuffer();
+  return new Uint8Array(buffer);
 }

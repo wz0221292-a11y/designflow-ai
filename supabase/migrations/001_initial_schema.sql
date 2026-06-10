@@ -31,8 +31,8 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users can view own profile" ON profiles
   FOR SELECT USING (auth.uid() = id);
 
-CREATE POLICY "Users can update own profile" ON profiles
-  FOR UPDATE USING (auth.uid() = id);
+REVOKE UPDATE ON profiles FROM authenticated;
+GRANT SELECT ON profiles TO authenticated;
 
 -- Create policies for projects
 CREATE POLICY "Users can view own projects" ON projects

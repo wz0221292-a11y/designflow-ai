@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import StepHeader, { stepInputClass, stepSubCardClass } from './StepHeader';
+import StepHeader, { stepSubCardClass } from './StepHeader';
 
 interface BackgroundStepProps {
   content: string | null;
@@ -34,20 +34,15 @@ export default function BackgroundStep({ content, isLoading, onUpdate }: Backgro
         icon={
           <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
         }
+        action={
+          hasContent ? (
+            <div className="flex items-center gap-2 rounded-full bg-blue-50 px-4 py-2 text-sm font-bold text-blue-600">
+              <span className="flex h-2.5 w-2.5 rounded-full bg-blue-500" />
+              {wordCount} 字
+            </div>
+          ) : undefined
+        }
       />
-
-      {/* Status banner */}
-      {hasContent && (
-        <div className="mb-6 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-cyan-50/50 px-5 py-3.5 text-sm font-semibold text-blue-800 flex items-center gap-3 shadow-sm">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-100">
-            <svg className="h-5 w-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-          </div>
-          <div>
-            <span>背景研究已完成</span>
-            <span className="ml-2 font-normal text-blue-600">· {wordCount} 字</span>
-          </div>
-        </div>
-      )}
 
       {isLoading ? (
         <div className="space-y-4">
@@ -57,26 +52,18 @@ export default function BackgroundStep({ content, isLoading, onUpdate }: Backgro
         </div>
       ) : (
         <div className="relative">
-          {/* Editor card */}
-          <div className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-lg shadow-slate-200/20 transition-all focus-within:border-blue-300 focus-within:shadow-xl focus-within:shadow-blue-100/30 focus-within:ring-2 focus-within:ring-blue-200">
-            {/* Card top bar */}
-            <div className="h-1.5 w-full bg-gradient-to-r from-blue-500 to-cyan-500" />
-
-            <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50">
-                <svg className="h-4 w-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+          <div className="overflow-hidden rounded-[1.75rem] border border-blue-200 bg-gradient-to-br from-blue-50/30 via-white to-white shadow-lg shadow-blue-100/20 transition-all focus-within:border-blue-300 focus-within:shadow-xl focus-within:shadow-blue-100/30">
+            <div className="flex items-center gap-2 border-b border-blue-200/80 bg-gradient-to-b from-blue-50/50 to-white px-6 py-3.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500 shadow-sm shadow-blue-200/50">
+                <svg className="h-4 w-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
               </div>
-              <span className="text-sm font-black text-slate-800">研究内容编辑</span>
-              {hasContent && (
-                <span className="ml-auto rounded-full bg-slate-100 px-2.5 py-0.5 text-[10px] font-bold text-slate-500">{wordCount} 字符</span>
-              )}
+              <span className="text-sm font-black text-slate-700">研究内容编辑</span>
             </div>
-
             <textarea
               value={content || ''}
               onChange={(e) => onUpdate(e.target.value)}
               placeholder="在此编辑背景研究内容，涵盖现有痛点、市场机会、技术趋势和竞品分析等方面…"
-              className="h-72 w-full resize-none border-none bg-white px-5 py-4 text-sm font-medium leading-7 text-slate-800 outline-none placeholder:font-medium placeholder:text-slate-400 focus:ring-0"
+              className="h-72 w-full resize-none border-none bg-transparent px-6 py-4 text-sm font-medium leading-7 text-slate-700 outline-none placeholder:font-medium placeholder:text-slate-500 focus:ring-0"
             />
           </div>
         </div>
@@ -84,7 +71,7 @@ export default function BackgroundStep({ content, isLoading, onUpdate }: Backgro
 
       {/* Tag pills */}
       <div className="mt-5 flex flex-wrap items-center gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">研究方向</span>
+        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">研究方向</span>
         {TAG_PILLS.map((tag) => (
           <span
             key={tag.label}
