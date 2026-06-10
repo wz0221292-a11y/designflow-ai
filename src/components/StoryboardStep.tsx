@@ -162,11 +162,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   const [aiFramePrompts, setAiFramePrompts] = useState<string[]>([]);
   const imagesRef = useRef<StoryboardImage[]>(normalizeImages(images, projectId));
 
-  // 正在等新文案的槽位——该阶段不通过 onUpdate 触发自动保存，只标记 UI 状态
-  const [slotsWithPendingText, setSlotsWithPendingText] = useState<Set<number>>(new Set());
-  const [slotsWithImageStarting, setSlotsWithImageStarting] = useState<Set<number>>(new Set());
-
-  // ── 服务端 frame regeneration jobs ──
+  // ── 服务端 frame regeneration jobs（唯一流程真相源）──
   const [regenJobs, setRegenJobs] = useState<Record<number, any>>({});
   const regenJobsRef = useRef<Record<number, any>>({});
 
@@ -199,9 +195,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           };
           return n;
         });
-        // 新文案已到达，清除 pending 标记
-        setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(task.slotIndex); return next; });
-    setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(task.slotIndex); return next; });
+        // 新文案已到达
         setAiFramePrompts(prev => { const next = [...prev]; next[task.slotIndex] = prompt; return next; });
         return { description, prompt };
       },
@@ -236,7 +230,6 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         if (currentSlot.generationId && currentSlot.generationId !== task.clientRequestId) return;
         if (!result.prompt) return; // 空结果（版本被淘汰）
         const imageClientRequestId = deriveImageClientRequestId(task.clientRequestId);
-        setSlotsWithImageStarting(prev => new Set(prev).add(task.slotIndex));
         const { data: { user } } = await supabase.auth.getUser();
         const imageResult = await startImageGeneration({
           projectId: task.projectId,
@@ -248,7 +241,6 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           userId: user?.id,
           clientRequestId: imageClientRequestId,
         });
-        setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(task.slotIndex); return next; });
         const latestSlot = normalizeImages(imagesRef.current, projectId)[task.slotIndex];
         const patch = await fetch(`/api/projects/${task.projectId}/image-slot`, {
           method: 'PATCH',
@@ -276,14 +268,9 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return subscribePromptTasks((updated) => setPromptTasks(updated));
   }, []);
 
-  // resume：挂载/切路由回来时恢复所有 unexpired running 任务
+  // resume：挂载/切路由回来时恢复所有 unexpired running 任务（前端 promptTasks 过渡期保留）
   useEffect(() => {
     const tasks = getResumableRunningTasks(projectId);
-    if (tasks.length > 0) {
-      const pending = new Set(tasks.map(t => t.slotIndex));
-      setSlotsWithPendingText(pending);
-      setSlotsWithImageStarting(pending);
-    }
     for (const task of tasks) void ensurePromptTaskRunning(task);
   }, [projectId, promptTasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -310,17 +297,9 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         }
         setRegenJobs(jobs);
 
-        // 活跃 job → 标记 pending 状态
-        for (const idx of activeSlotSet) {
-          setSlotsWithPendingText(prev => { const next = new Set(prev); next.add(idx); return next; });
-          setSlotsWithImageStarting(prev => { const next = new Set(prev); next.add(idx); return next; });
-        }
-
-        // 新完成的 job → 刷新项目数据 + 清除本地 pending
+        // 新完成的 job → 刷新项目数据（文字+图片一起出现）
         for (const j of data.jobs || []) {
           if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
-            setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(j.slot_index); return next; });
-            setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(j.slot_index); return next; });
             syncFromStore();
             onGenerated?.();
           }
@@ -361,7 +340,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   useEffect(() => {
     setPromptGenStatus('idle');
     setAiFramePrompts([]);
-    setSlotsWithImageStarting(new Set());
+    setRegenJobs({});
+    regenJobsRef.current = {};
     setLastError(null);
   }, [projectId]);
 
@@ -480,32 +460,27 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return buildBoundStoryboardPrompt(visualPrompt, desc || defaultPanelDescriptions[idx]);
   }, [aiFramePrompts, idea]);
 
-  // 单卡重新生成：调用服务端 /api/frame-regeneration 编排 prompt + image
+  // 单卡重新生成：调用服务端 /api/frame-regeneration
   const regenerateFrameAndImage = async (idx: number) => {
     const existingJob = regenJobs[idx];
     const existingActive = existingJob && existingJob.status !== 'completed' && existingJob.status !== 'failed';
-    if (generatingSlots[idx] || promptingSlots[idx] || existingActive || slotsWithImageStarting.has(idx)) return;
+    if (generatingSlots[idx] || promptingSlots[idx] || existingActive) return;
     setLastError(null);
 
-    const generationId = `regenerate-${projectId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const generationId = `regen-${projectId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // 乐观更新 UI
+    // 乐观更新
     setRegenJobs(prev => ({
       ...prev,
-      [idx]: { slot_index: idx, status: 'generating_prompt', generation_id: generationId },
+      [idx]: { slot_index: idx, status: 'queued', generation_id: generationId },
     }));
-    setSlotsWithPendingText(prev => new Set(prev).add(idx));
-    setSlotsWithImageStarting(prev => { const next = new Set(prev); next.add(idx); return next; });
 
     try {
       const res = await fetch('/api/frame-regeneration', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          projectId,
-          slotIndex: idx,
-          generationId,
-          idea,
+          projectId, slotIndex: idx, generationId, idea,
           productIntro,
           referenceImage: referenceImage || undefined,
           selectedAppearanceIndex,
@@ -515,9 +490,6 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
       if (data.job?.status === 'completed') {
-        // 同步完成 → 刷新 + 清除 pending
-        setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(idx); return next; });
-        setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(idx); return next; });
         syncFromStore();
         onGenerated?.();
       }
@@ -525,8 +497,6 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     } catch (e: any) {
       setLastError(e.message || '重生成失败');
       setRegenJobs(prev => { const next = { ...prev }; delete next[idx]; return next; });
-      setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(idx); return next; });
-      setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(idx); return next; });
     }
   };
 
@@ -582,15 +552,9 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   }
 
   const _currentImages = normalizeImages(images, projectId);
-  // 合并 UI 状态：pending 文字槽位显示为已清空，不展示旧文案
-  // 同时过滤不属于当前项目的数据（防串台最终防线）
   const displayImages = _currentImages.map((img, idx) => {
     const safe = safeFrameForProject(img, projectId);
-    const base = safe || normalizeImages([], projectId)[idx];
-    if (slotsWithPendingText.has(idx)) {
-      return { ...base, description: '', prompt: '' };
-    }
-    return base;
+    return safe || normalizeImages([], projectId)[idx];
   });
   const currentImages = displayImages;
   const hasAnyImage = currentImages.some(img => img.url);
@@ -675,8 +639,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
               {/* Image */}
               {hasImg ? (
-                <div className="relative aspect-video cursor-pointer overflow-hidden bg-slate-100" onClick={() => !isGen && !promptingSlots[idx] && !slotsWithImageStarting.has(idx) && setPreviewImage(img.url)}>
-                  <img src={img.url} alt={SCENE_LABELS[idx]} className={`h-full w-full object-cover transition duration-500 ${isGen || promptingSlots[idx] || slotsWithImageStarting.has(idx) ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`}
+                <div className="relative aspect-video cursor-pointer overflow-hidden bg-slate-100" onClick={() => !isGen && !promptingSlots[idx] && setPreviewImage(img.url)}>
+                  <img src={img.url} alt={SCENE_LABELS[idx]} className={`h-full w-full object-cover transition duration-500 ${isGen || promptingSlots[idx] ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`}
                     onError={(e) => {
                       const { url } = resolveImageUrl(null, img.storagePath || null);
                       if (url && url !== (e.target as HTMLImageElement).src) {
@@ -685,7 +649,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                     }}
                   />
                   {/* 生成中遮罩 */}
-                  {(isGen || promptingSlots[idx] || slotsWithImageStarting.has(idx)) && (
+                  {(isGen || promptingSlots[idx]) && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-amber-500/20 via-amber-400/10 to-orange-500/20 backdrop-blur-[1px]">
                       <div className="relative">
                         <span className="absolute inset-0 h-12 w-12 animate-ping rounded-full bg-amber-400/30" />
@@ -706,7 +670,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                       </div>
                     </div>
                   )}
-                  <div className={`absolute inset-0 bg-black/0 transition-colors ${isGen || promptingSlots[idx] || slotsWithImageStarting.has(idx) ? '' : 'group-hover:bg-black/5'}`} />
+                  <div className={`absolute inset-0 bg-black/0 transition-colors ${isGen || promptingSlots[idx] ? '' : 'group-hover:bg-black/5'}`} />
                   <span className="absolute top-2.5 left-2.5 flex h-6 w-6 items-center justify-center rounded-lg bg-black/45 text-[11px] font-bold text-white backdrop-blur-sm">{idx + 1}</span>
                   {/* 生成中脉冲边框 */}
                   {isGen && (
@@ -758,10 +722,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                   <span className="text-[13px] font-bold text-slate-700 truncate">{SCENE_LABELS[idx]}</span>
                   {hasImg && !isGen && (
                     <button onClick={() => regenerateFrameAndImage(idx)}
-                      disabled={!!promptingSlots[idx] || slotsWithImageStarting.has(idx) || regenJobs[idx]?.status === 'generating_image'}
+                      disabled={!!promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image'}
                       className="ml-auto inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 outline-none transition-all hover:bg-white hover:border-slate-300 hover:text-slate-700 active:scale-[0.96] disabled:opacity-50"
                       title="重新生成此分镜（先刷新故事描述，再生成图片）">
-                      {promptingSlots[idx] || slotsWithImageStarting.has(idx) || regenJobs[idx]?.status === 'generating_image' ? (
+                      {promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image' ? (
                         <><span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />重整故事…</>
                       ) : (
                         <><svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>重想故事再生图</>
