@@ -10,20 +10,135 @@ import { normalizeStoryboardImages } from '@/lib/storyboard';
 export const dynamic = 'force-dynamic';
 
 /**
+ * 后台执行帧重生成全流程（不绑定 HTTP 请求生命周期）
+ * 刷新/切页不影响执行——状态全部写到 frame_regeneration_jobs 表中
+ */
+async function processFrameRegeneration(jobId: string, params: {
+  projectId: string;
+  userId: string;
+  slotIndex: number;
+  generationId: string;
+  idea: string;
+  productIntro?: any;
+  referenceImage?: string;
+  selectedAppearanceIndex?: number;
+  storyboardImages: any;
+}) {
+  const {
+    projectId, userId, slotIndex, generationId, idea,
+    productIntro, referenceImage, selectedAppearanceIndex,
+    storyboardImages,
+  } = params;
+
+  const jobUpdate = (fields: Record<string, any>) =>
+    supabaseAdmin.from('frame_regeneration_jobs').update({
+      ...fields,
+      updated_at: new Date().toISOString(),
+    }).eq('id', jobId);
+
+  // ── Phase 1: 生成提示词 ──
+  let description: string;
+  let prompt: string;
+
+  try {
+    const ctx = buildStoryboardContext(productIntro, referenceImage, selectedAppearanceIndex);
+    const promptResult = await generateStoryboardPrompts(idea, ctx);
+
+    if (!promptResult.success || !promptResult.frames) {
+      throw new Error(promptResult.error || '提示词生成失败');
+    }
+
+    const frame = promptResult.frames.find((f: any) => f.index === slotIndex)
+      || promptResult.frames[slotIndex];
+
+    if (!frame) throw new Error(`未找到第 ${slotIndex + 1} 帧的提示词`);
+
+    description = frame.description || frame.sceneTitle || '';
+    prompt = buildBoundStoryboardPrompt(frame.visualPrompt, description);
+
+    await jobUpdate({
+      status: 'generating_image',
+      description_draft: description,
+      prompt_draft: prompt,
+    });
+  } catch (err: any) {
+    await jobUpdate({ status: 'failed', error_message: `Prompt: ${err.message}` });
+    return;
+  }
+
+  // ── Phase 2: 生成图片 ──
+  let imageUrl: string;
+  let storagePath: string;
+  let fileSize: number;
+
+  try {
+    const imageResult = await generateImage({
+      type: 'storyboard',
+      prompt,
+      referenceImage: referenceImage || undefined,
+      slotIndex,
+      expectedTotal: 6,
+    });
+
+    if (!imageResult.success || !imageResult.imageUrl) {
+      throw new Error(imageResult.error || '图片生成失败');
+    }
+
+    const saved = await persistGeneratedImage({
+      tempUrl: imageResult.imageUrl,
+      userId,
+      projectId,
+      step: 'storyboard',
+      slotIndex,
+    });
+
+    imageUrl = saved.publicUrl;
+    storagePath = saved.storagePath;
+    fileSize = saved.fileSize;
+  } catch (err: any) {
+    await jobUpdate({ status: 'failed', error_message: `Image: ${err.message}` });
+    return;
+  }
+
+  // ── Phase 3: 原子提交到 projects.storyboard_images ──
+  try {
+    const currentImages = normalizeStoryboardImages(storyboardImages, projectId);
+    currentImages[slotIndex] = {
+      ...currentImages[slotIndex],
+      projectId,
+      stepKey: 'storyboard' as const,
+      slotIndex,
+      generationId,
+      url: imageUrl,
+      storagePath,
+      description,
+      prompt,
+    };
+
+    await supabaseAdmin
+      .from('projects')
+      .update({ storyboard_images: currentImages })
+      .eq('id', projectId)
+      .eq('user_id', userId);
+  } catch (err: any) {
+    await jobUpdate({ status: 'failed', error_message: `Commit: ${err.message}` });
+    return;
+  }
+
+  // ── Phase 4: 标记完成 ──
+  await jobUpdate({
+    status: 'completed',
+    image_url_draft: imageUrl,
+    storage_path_draft: storagePath,
+    file_size_draft: fileSize,
+  });
+}
+
+/**
  * POST /api/frame-regeneration
  *
- * 服务端编排：单槽位 prompt 生成 + 图片生成 → 原子提交到 projects.storyboard_images
- *
- * Body: {
- *   projectId: string;
- *   slotIndex: number;
- *   generationId: string;
- *   idea: string;
- *   productIntro?: ProductIntro;
- *   referenceImage?: string;
- *   selectedAppearanceIndex?: number;
- *   context?: string;
- * }
+ * 只创建 job 并立即返回。后台异步执行 prompt + image + 原子提交。
+ * 刷新/切页不中断——前端回来轮询 GET 即可。
  */
 export async function POST(request: NextRequest) {
   try {
@@ -50,7 +165,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'slotIndex 必须在 0-5 之间' }, { status: 400 });
     }
 
-    // 验证项目归属
+    // 验证项目归属 + 读取 storyboard_images（供后台提交时使用）
     const { data: project, error: projectError } = await supabaseAdmin
       .from('projects')
       .select('id, user_id, storyboard_images')
@@ -62,7 +177,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '项目不存在或无权访问' }, { status: 404 });
     }
 
-    // 幂等：检查是否已有同一 generationId 的 job
+    // 幂等：同 generationId 不重复创建
     const { data: existingJob } = await supabaseAdmin
       .from('frame_regeneration_jobs')
       .select('*')
@@ -72,22 +187,14 @@ export async function POST(request: NextRequest) {
       .maybeSingle();
 
     if (existingJob) {
-      if (existingJob.status === 'completed') {
-        return NextResponse.json({ success: true, job: existingJob });
-      }
       if (existingJob.status === 'failed') {
-        // 允许重试：删除旧 job 继续
-        await supabaseAdmin
-          .from('frame_regeneration_jobs')
-          .delete()
-          .eq('id', existingJob.id);
+        await supabaseAdmin.from('frame_regeneration_jobs').delete().eq('id', existingJob.id);
       } else {
-        // queued / generating_prompt / generating_image — 还在跑，返回当前状态
         return NextResponse.json({ success: true, job: existingJob });
       }
     }
 
-    // 创建 job
+    // 创建 job（初始状态：queued）
     const { data: job, error: createError } = await supabaseAdmin
       .from('frame_regeneration_jobs')
       .insert({
@@ -95,7 +202,7 @@ export async function POST(request: NextRequest) {
         user_id: user.id,
         slot_index: slotIndex,
         generation_id: generationId,
-        status: 'generating_prompt',
+        status: 'queued',  // ← 不在此请求中跑编排
       })
       .select()
       .single();
@@ -105,151 +212,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '创建任务失败' }, { status: 500 });
     }
 
-    // ── Phase 1: 生成提示词 ──
-    let description: string;
-    let prompt: string;
+    // fire-and-forget：后台异步执行全流程，不阻塞 HTTP 响应
+    processFrameRegeneration(job.id, {
+      projectId,
+      userId: user.id,
+      slotIndex,
+      generationId,
+      idea,
+      productIntro,
+      referenceImage,
+      selectedAppearanceIndex,
+      storyboardImages: (project as any).storyboard_images,
+    }).catch(err => {
+      console.error('frame-regeneration 后台任务异常:', err);
+    });
 
-    try {
-      const ctx = buildStoryboardContext(productIntro, referenceImage, selectedAppearanceIndex);
-      const promptResult = await generateStoryboardPrompts(idea, ctx);
-
-      if (!promptResult.success || !promptResult.frames) {
-        throw new Error(promptResult.error || '提示词生成失败');
-      }
-
-      const frame = promptResult.frames.find((f: any) => f.index === slotIndex)
-        || promptResult.frames[slotIndex];
-
-      if (!frame) throw new Error(`未找到第 ${slotIndex + 1} 帧的提示词`);
-
-      description = frame.description || frame.sceneTitle || '';
-      prompt = buildBoundStoryboardPrompt(frame.visualPrompt, description);
-
-      // 更新 job: prompt 完成，进入生图阶段
-      await supabaseAdmin
-        .from('frame_regeneration_jobs')
-        .update({
-          status: 'generating_image',
-          description_draft: description,
-          prompt_draft: prompt,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', job.id);
-    } catch (promptError: any) {
-      await supabaseAdmin
-        .from('frame_regeneration_jobs')
-        .update({
-          status: 'failed',
-          error_message: `Prompt: ${promptError.message}`,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', job.id);
-      return NextResponse.json(
-        { error: `提示词生成失败: ${promptError.message}` },
-        { status: 500 },
-      );
-    }
-
-    // ── Phase 2: 生成图片 ──
-    let imageUrl: string;
-    let storagePath: string;
-    let fileSize: number;
-
-    try {
-      const imageResult = await generateImage({
-        type: 'storyboard',
-        prompt,
-        referenceImage: referenceImage || undefined,
-        slotIndex,
-        expectedTotal: 6,
-      });
-
-      if (!imageResult.success || !imageResult.imageUrl) {
-        throw new Error(imageResult.error || '图片生成失败');
-      }
-
-      // 持久化
-      const saved = await persistGeneratedImage({
-        tempUrl: imageResult.imageUrl,
-        userId: user.id,
-        projectId,
-        step: 'storyboard',
-        slotIndex,
-      });
-
-      imageUrl = saved.publicUrl;
-      storagePath = saved.storagePath;
-      fileSize = saved.fileSize;
-    } catch (imageError: any) {
-      await supabaseAdmin
-        .from('frame_regeneration_jobs')
-        .update({
-          status: 'failed',
-          error_message: `Image: ${imageError.message}`,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', job.id);
-      return NextResponse.json(
-        { error: `图片生成失败: ${imageError.message}` },
-        { status: 500 },
-      );
-    }
-
-    // ── Phase 3: 原子提交 — 一次性写回 storyboard_images ──
-    try {
-      const currentImages = normalizeStoryboardImages(
-        (project as any).storyboard_images,
-        projectId,
-      );
-
-      // 版本校验：只允许当前 generationId 的结果写入
-      currentImages[slotIndex] = {
-        ...currentImages[slotIndex],
-        projectId,
-        stepKey: 'storyboard' as const,
-        slotIndex,
-        generationId,
-        url: imageUrl,
-        storagePath,
-        description,
-        prompt,
-      };
-
-      await supabaseAdmin
-        .from('projects')
-        .update({ storyboard_images: currentImages })
-        .eq('id', projectId)
-        .eq('user_id', user.id);
-    } catch (commitError: any) {
-      await supabaseAdmin
-        .from('frame_regeneration_jobs')
-        .update({
-          status: 'failed',
-          error_message: `Commit: ${commitError.message}`,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', job.id);
-      return NextResponse.json(
-        { error: `保存失败: ${commitError.message}` },
-        { status: 500 },
-      );
-    }
-
-    // ── Phase 4: 标记完成 ──
-    const { data: completedJob } = await supabaseAdmin
-      .from('frame_regeneration_jobs')
-      .update({
-        status: 'completed',
-        image_url_draft: imageUrl,
-        storage_path_draft: storagePath,
-        file_size_draft: fileSize,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', job.id)
-      .select()
-      .single();
-
-    return NextResponse.json({ success: true, job: completedJob || job });
+    // 立即返回 job，前端轮询 GET 获取进展
+    return NextResponse.json({ success: true, job });
   } catch (error: any) {
     if (error.message === 'Unauthorized') {
       return NextResponse.json({ error: '请先登录' }, { status: 401 });
@@ -262,7 +241,7 @@ export async function POST(request: NextRequest) {
 /**
  * GET /api/frame-regeneration?projectId=...
  *
- * 查询项目下所有活跃/最近完成的 regeneration jobs
+ * 纯查询：返回项目下最近 5 分钟的 jobs
  */
 export async function GET(request: NextRequest) {
   try {
@@ -274,7 +253,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '缺少 projectId' }, { status: 400 });
     }
 
-    // 验证项目归属
     const { data: project, error: projectError } = await supabaseAdmin
       .from('projects')
       .select('id')
@@ -286,7 +264,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '项目不存在或无权访问' }, { status: 404 });
     }
 
-    // 返回最近 5 分钟内活跃或完成的 jobs
     const since = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { data: jobs, error } = await supabaseAdmin
       .from('frame_regeneration_jobs')
