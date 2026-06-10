@@ -166,6 +166,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   const [slotsWithPendingText, setSlotsWithPendingText] = useState<Set<number>>(new Set());
   const [slotsWithImageStarting, setSlotsWithImageStarting] = useState<Set<number>>(new Set());
 
+  // ── 服务端 frame regeneration jobs ──
+  const [regenJobs, setRegenJobs] = useState<Record<number, any>>({});
+  const regenJobsRef = useRef<Record<number, any>>({});
+
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
 
   const { generatingSlots, completedImages, startGeneration, syncFromStore } = useImageTaskStore({ projectId, step: 'storyboard' });
@@ -283,14 +287,69 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     for (const task of tasks) void ensurePromptTaskRunning(task);
   }, [projectId, promptTasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // promptingSlots 从 promptTasks 派生
+  // ── 轮询服务端 frame regeneration jobs ──
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`/api/frame-regeneration?projectId=${encodeURIComponent(projectId)}`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const jobs: Record<number, any> = {};
+        let hasActive = false;
+        const activeSlotSet = new Set<number>();
+        for (const j of data.jobs || []) {
+          jobs[j.slot_index] = j;
+          if (j.status !== 'completed' && j.status !== 'failed') {
+            hasActive = true;
+            activeSlotSet.add(j.slot_index);
+          }
+        }
+        setRegenJobs(jobs);
+
+        // 活跃 job → 标记 pending 状态
+        for (const idx of activeSlotSet) {
+          setSlotsWithPendingText(prev => { const next = new Set(prev); next.add(idx); return next; });
+          setSlotsWithImageStarting(prev => { const next = new Set(prev); next.add(idx); return next; });
+        }
+
+        // 新完成的 job → 刷新项目数据 + 清除本地 pending
+        for (const j of data.jobs || []) {
+          if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
+            setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(j.slot_index); return next; });
+            setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(j.slot_index); return next; });
+            syncFromStore();
+            onGenerated?.();
+          }
+        }
+
+        regenJobsRef.current = jobs;
+        if (hasActive) timer = setTimeout(poll, 2000);
+      } catch { /* transient */ }
+    };
+
+    poll();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // promptingSlots：前端 promptTasks + 服务端 regenJobs
   const promptingSlots: Record<number, boolean> = {};
-  /** 每帧最新的重整 key，用于 textarea 强制重新挂载 */
   const slotRegenKey: Record<number, string> = {};
   for (const task of Object.values(promptTasks)) {
     if (task.projectId === projectId && isPromptActive(task)) {
       promptingSlots[task.slotIndex] = true;
       slotRegenKey[task.slotIndex] = task.clientRequestId;
+    }
+  }
+  // 服务端 job 状态也反映到 prompting + generating
+  for (const [idxStr, job] of Object.entries(regenJobs)) {
+    const idx = Number(idxStr);
+    if (job.status === 'queued' || job.status === 'generating_prompt') {
+      promptingSlots[idx] = true;
+      slotRegenKey[idx] = job.generation_id || slotRegenKey[idx];
     }
   }
 
@@ -421,21 +480,54 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return buildBoundStoryboardPrompt(visualPrompt, desc || defaultPanelDescriptions[idx]);
   }, [aiFramePrompts, idea]);
 
-  // 单卡重新生成：只触发，模块级 runner 接管全部后续（generate → flush → startImage）
-  const regenerateFrameAndImage = (idx: number) => {
-    if (generatingSlots[idx] || promptingSlots[idx] || slotsWithImageStarting.has(idx)) return;
+  // 单卡重新生成：调用服务端 /api/frame-regeneration 编排 prompt + image
+  const regenerateFrameAndImage = async (idx: number) => {
+    const existingJob = regenJobs[idx];
+    const existingActive = existingJob && existingJob.status !== 'completed' && existingJob.status !== 'failed';
+    if (generatingSlots[idx] || promptingSlots[idx] || existingActive || slotsWithImageStarting.has(idx)) return;
     setLastError(null);
-    const task = startPromptTask(projectId, idx);
-    const regenerationId = task.clientRequestId;
-    // 把 _regenerationId 写进 imagesRef（不触发 onUpdate → 不加入自动保存队列，防止刷新时空文本落库）
-    const cur = normalizeImages(imagesRef.current, projectId);
-    cur[idx] = { ...cur[idx], description: '', prompt: '', generationId: regenerationId };
-    imagesRef.current = cur;
-    // 标记 UI 状态
-    setSlotsWithImageStarting(prev => { const next = new Set(prev); next.add(idx); return next; });
+
+    const generationId = `regenerate-${projectId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // 乐观更新 UI
+    setRegenJobs(prev => ({
+      ...prev,
+      [idx]: { slot_index: idx, status: 'generating_prompt', generation_id: generationId },
+    }));
     setSlotsWithPendingText(prev => new Set(prev).add(idx));
-    setPromptTasks(initializePromptStore());
-    void ensurePromptTaskRunning(task);
+    setSlotsWithImageStarting(prev => { const next = new Set(prev); next.add(idx); return next; });
+
+    try {
+      const res = await fetch('/api/frame-regeneration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId,
+          slotIndex: idx,
+          generationId,
+          idea,
+          productIntro,
+          referenceImage: referenceImage || undefined,
+          selectedAppearanceIndex,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+      if (data.job?.status === 'completed') {
+        // 同步完成 → 刷新 + 清除 pending
+        setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(idx); return next; });
+        setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(idx); return next; });
+        syncFromStore();
+        onGenerated?.();
+      }
+      // 否则等轮询
+    } catch (e: any) {
+      setLastError(e.message || '重生成失败');
+      setRegenJobs(prev => { const next = { ...prev }; delete next[idx]; return next; });
+      setSlotsWithPendingText(prev => { const next = new Set(prev); next.delete(idx); return next; });
+      setSlotsWithImageStarting(prev => { const next = new Set(prev); next.delete(idx); return next; });
+    }
   };
 
   // 首次生成/补全：直接使用已有提示词生成图片（不重新刷新提示词）
@@ -564,7 +656,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       {/* Grid: 3 columns × 2 rows = 6 panels */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {displayImages.map((img, idx) => {
-          const isGen = generatingSlots[idx];
+          const serverGen = regenJobs[idx]?.status === 'generating_image';
+          const isGen = generatingSlots[idx] || serverGen;
           const hasImg = Boolean(img.url);
           const col = SCENE_COLORS[idx];
 
@@ -665,10 +758,10 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                   <span className="text-[13px] font-bold text-slate-700 truncate">{SCENE_LABELS[idx]}</span>
                   {hasImg && !isGen && (
                     <button onClick={() => regenerateFrameAndImage(idx)}
-                      disabled={!!promptingSlots[idx] || slotsWithImageStarting.has(idx)}
+                      disabled={!!promptingSlots[idx] || slotsWithImageStarting.has(idx) || regenJobs[idx]?.status === 'generating_image'}
                       className="ml-auto inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 outline-none transition-all hover:bg-white hover:border-slate-300 hover:text-slate-700 active:scale-[0.96] disabled:opacity-50"
                       title="重新生成此分镜（先刷新故事描述，再生成图片）">
-                      {promptingSlots[idx] || slotsWithImageStarting.has(idx) ? (
+                      {promptingSlots[idx] || slotsWithImageStarting.has(idx) || regenJobs[idx]?.status === 'generating_image' ? (
                         <><span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />重整故事…</>
                       ) : (
                         <><svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>重想故事再生图</>
@@ -682,7 +775,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                   onChange={e => handleDesc(idx, e.target.value)}
                   className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12px] leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-500 focus:border-slate-300 focus:bg-slate-100 focus:ring-2 focus:ring-slate-200 h-16"
                   placeholder={defaultPanelDescriptions[idx]}
-                  disabled={!!promptingSlots[idx]}
+                  disabled={!!promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image'}
                 />
               </div>
             </div>
