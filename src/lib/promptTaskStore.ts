@@ -272,10 +272,10 @@ export function setPromptTaskExecutor(
 }
 
 export function clearPromptTaskExecutor() {
-  promptExecutor = null;
-  flushPromptResult = null;
-  startImageAfterPrompt = null;
-  inflightPromptRuns.clear();
+  // 模块级执行器不随组件卸载清除：
+  // 1. inflight 的 Promise 需要继续跑完 Phase 3 (flush) 和 Phase 4 (startImage)
+  // 2. 回调在下次 setPromptTaskExecutor 时自然覆盖
+  // 3. 回调内部检查 task.projectId !== pid 防止跨项目串扰
 }
 
 const inflightPromptRuns = new Map<string, Promise<void>>();
