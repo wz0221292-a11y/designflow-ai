@@ -456,7 +456,13 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   const _currentImages = normalizeImages(images, projectId);
   const displayImages = _currentImages.map((img, idx) => {
     const safe = safeFrameForProject(img, projectId);
-    return safe || normalizeImages([], projectId)[idx];
+    const base = safe || normalizeImages([], projectId)[idx];
+    // 重整期间隐藏旧文字，等 job 完成后图文一起出现
+    const job = regenJobs[idx];
+    if (job && job.status !== 'completed' && job.status !== 'failed') {
+      return { ...base, description: '', prompt: '' };
+    }
+    return base;
   });
   const currentImages = displayImages;
   const hasAnyImage = currentImages.some(img => img.url);
