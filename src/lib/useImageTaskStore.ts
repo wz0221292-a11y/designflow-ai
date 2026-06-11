@@ -12,6 +12,7 @@ import {
   hasActiveTasksForProject,
   isActiveTask,
   isTerminalTask,
+  markTaskFailed,
 } from './imageTaskStore';
 
 interface UseImageTaskStoreOptions {
@@ -146,6 +147,22 @@ export function useImageTaskStore({ projectId, step }: UseImageTaskStoreOptions)
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [refresh, projectId, step]);
+
+  // 本地 optimistic 超时兜底：请求没真正发到服务端时，自动退出生成中，允许用户重试。
+  useEffect(() => {
+    const now = Date.now();
+    for (const task of Object.values(tasks)) {
+      if (
+        task.projectId === projectId &&
+        task.step === step &&
+        task.status === 'optimistic' &&
+        !task.serverJobId &&
+        now - task.createdAt > 15_000
+      ) {
+        markTaskFailed(task.clientRequestId, '本地生图请求未被服务端确认，请重试');
+      }
+    }
+  }, [tasks, projectId, step]);
 
   // slot 视图状态
   const getSlotState = useCallback((slotIndex: number, currentImageUrl?: string): SlotViewState => {

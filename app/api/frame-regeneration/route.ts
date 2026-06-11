@@ -22,12 +22,10 @@ async function processFrameRegeneration(jobId: string, params: {
   productIntro?: any;
   referenceImage?: string;
   selectedAppearanceIndex?: number;
-  storyboardImages: any;
 }) {
   const {
     projectId, userId, slotIndex, generationId, idea,
     productIntro, referenceImage, selectedAppearanceIndex,
-    storyboardImages,
   } = params;
 
   const jobUpdate = (fields: Record<string, any>) =>
@@ -41,6 +39,8 @@ async function processFrameRegeneration(jobId: string, params: {
   let prompt: string;
 
   try {
+    await jobUpdate({ status: 'generating_prompt' });
+
     const ctx = buildStoryboardContext(productIntro, referenceImage, selectedAppearanceIndex);
     const promptResult = await generateStoryboardPrompts(idea, ctx);
 
@@ -102,7 +102,49 @@ async function processFrameRegeneration(jobId: string, params: {
 
   // ── Phase 3: 原子提交到 projects.storyboard_images ──
   try {
-    const currentImages = normalizeStoryboardImages(storyboardImages, projectId);
+    const { data: currentJob, error: currentJobError } = await supabaseAdmin
+      .from('frame_regeneration_jobs')
+      .select('created_at')
+      .eq('id', jobId)
+      .single();
+
+    if (currentJobError || !currentJob) {
+      throw new Error(currentJobError?.message || '读取当前重生成任务失败');
+    }
+
+    const { data: newerJob, error: newerJobError } = await supabaseAdmin
+      .from('frame_regeneration_jobs')
+      .select('id, generation_id, status, created_at')
+      .eq('project_id', projectId)
+      .eq('slot_index', slotIndex)
+      .gt('created_at', (currentJob as any).created_at)
+      .neq('status', 'failed')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (newerJobError) throw newerJobError;
+    if (newerJob) {
+      await jobUpdate({ status: 'failed', error_message: 'Superseded by newer regeneration job' });
+      return;
+    }
+
+    // 提交前重新读取最新 storyboard_images，避免长任务期间用 POST 时的旧快照覆盖其它帧。
+    const { data: latestProject, error: latestError } = await supabaseAdmin
+      .from('projects')
+      .select('storyboard_images')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .single();
+
+    if (latestError || !latestProject) {
+      throw new Error(latestError?.message || '读取最新故事板失败');
+    }
+
+    const currentImages = normalizeStoryboardImages(
+      (latestProject as any).storyboard_images,
+      projectId,
+    );
     currentImages[slotIndex] = {
       ...currentImages[slotIndex],
       projectId,
@@ -113,13 +155,16 @@ async function processFrameRegeneration(jobId: string, params: {
       storagePath,
       description,
       prompt,
+      status: 'ready' as const,
     };
 
-    await supabaseAdmin
+    const { error: commitError } = await supabaseAdmin
       .from('projects')
       .update({ storyboard_images: currentImages })
       .eq('id', projectId)
       .eq('user_id', userId);
+
+    if (commitError) throw commitError;
   } catch (err: any) {
     await jobUpdate({ status: 'failed', error_message: `Commit: ${err.message}` });
     return;
@@ -222,7 +267,6 @@ export async function POST(request: NextRequest) {
       productIntro,
       referenceImage,
       selectedAppearanceIndex,
-      storyboardImages: (project as any).storyboard_images,
     }).catch(err => {
       console.error('frame-regeneration 后台任务异常:', err);
     });

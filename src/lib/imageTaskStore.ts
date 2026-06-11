@@ -102,6 +102,20 @@ export function isActiveTask(task: ImageTask): boolean {
   return ACTIVE_STATUSES.has(task.status);
 }
 
+export function markTaskFailed(clientRequestId: string, errorMessage: string) {
+  const snapshot = readTaskStore();
+  const task = snapshot.tasks[clientRequestId];
+  if (!task || isTerminalTask(task)) return;
+  snapshot.tasks[clientRequestId] = {
+    ...task,
+    status: 'failed',
+    errorMessage,
+    updatedAt: Date.now(),
+  };
+  writeTaskStore(snapshot);
+  notifySubscribers(snapshot.tasks);
+}
+
 export function isTerminalTask(task: ImageTask): boolean {
   return TERMINAL_STATUSES.has(task.status);
 }
@@ -331,7 +345,18 @@ export async function startImageGeneration(input: {
   const existingForSlot = Object.values(snapshot.tasks).find(
     t => t.projectId === input.projectId && t.step === input.step && t.slotIndex === input.slotIndex && isActiveTask(t)
   );
-  if (existingForSlot) return { job: existingForSlot };
+  if (existingForSlot) {
+    const isUnconfirmedOptimistic = existingForSlot.status === 'optimistic' && !existingForSlot.serverJobId;
+    const isStaleUnconfirmed = isUnconfirmedOptimistic && now - existingForSlot.createdAt > 15_000;
+    if (!isStaleUnconfirmed) return { job: existingForSlot };
+
+    upsertLocalTask({
+      ...existingForSlot,
+      status: 'failed',
+      errorMessage: '本地生图请求未被服务端确认，已允许重新发起',
+      updatedAt: now,
+    });
+  }
 
   // 2. 先写 optimistic
   const optimisticTask: ImageTask = {
@@ -406,15 +431,13 @@ export async function startImageGeneration(input: {
 
     return {};
   } catch (error: any) {
-    // 网络错误不覆盖已有 optimistic（可能还在生成中）
-    if (error.message?.includes('HTTP')) {
-      upsertLocalTask({
-        ...optimisticTask,
-        status: 'failed',
-        errorMessage: error.message,
-        updatedAt: Date.now(),
-      });
-    }
+    // 网络错误或请求被中断时，也必须结束 optimistic，避免 UI 永久卡在生成中。
+    upsertLocalTask({
+      ...optimisticTask,
+      status: 'failed',
+      errorMessage: error.message || '生图请求未发送成功',
+      updatedAt: Date.now(),
+    });
     throw error;
   }
 }

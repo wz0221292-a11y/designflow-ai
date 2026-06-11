@@ -143,6 +143,9 @@ const buildFallbackPrompt = (idea: string, frameIndex: number, desc: string): st
 const normalizeImages = (images: StoryboardImage[] | null | undefined, projectId: string) =>
   normalizeStoryboardImages(images, projectId);
 
+const isLockedGeneratedFrame = (frame: StoryboardImage | undefined | null): boolean =>
+  Boolean(frame?.generationId && frame?.url && frame?.description);
+
 export default function StoryboardStep({ images, isLoading, idea, projectId, referenceImage, productIntro, selectedAppearanceIndex, onUpdate, onGeneratingChange, onGenerated, onFlushSave }: StoryboardStepProps) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -158,6 +161,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return bySlot;
   });
   const regenJobsRef = useRef<Record<number, any>>({});
+  const [regenPollNonce, setRegenPollNonce] = useState(0);
   useEffect(() => { imagesRef.current = normalizeImages(images, projectId); }, [images, projectId]);
   useEffect(() => { regenJobsRef.current = regenJobs; }, [regenJobs]);
   // 订阅 store 变更 → upsertLocalRegenJob 后立即更新 React state
@@ -182,25 +186,26 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       if (cancelled) return;
       try {
         const res = await fetch(`/api/frame-regeneration?projectId=${encodeURIComponent(projectId)}`);
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
+        if (res.ok && !cancelled) {
+          const data = await res.json();
 
-        reconcileServerRegenJobs((data.jobs || []).map((j: any) => ({
-          jobId: j.id,
-          projectId: j.project_id || projectId,
-          slotIndex: j.slot_index,
-          generationId: j.generation_id || '',
-          status: j.status,
-          updatedAt: Date.now(),
-        })));
+          reconcileServerRegenJobs((data.jobs || []).map((j: any) => ({
+            jobId: j.id,
+            projectId: j.project_id || projectId,
+            slotIndex: j.slot_index,
+            generationId: j.generation_id || '',
+            status: j.status,
+            updatedAt: Date.now(),
+          })));
 
-        for (const j of data.jobs || []) {
-          if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
-            syncFromStore();
-            onGenerated?.();
-            removeLocalRegenJob(projectId, j.slot_index, j.generation_id);
-            // 标记已处理，防止下一轮轮询重复触发
-            regenJobsRef.current[j.slot_index] = { status: 'completed' };
+          for (const j of data.jobs || []) {
+            if (j.status === 'completed' && regenJobsRef.current[j.slot_index]?.status !== 'completed') {
+              syncFromStore();
+              onGenerated?.();
+              removeLocalRegenJob(projectId, j.slot_index, j.generation_id);
+              // 标记已处理，防止下一轮轮询重复触发
+              regenJobsRef.current[j.slot_index] = { status: 'completed' };
+            }
           }
         }
       } catch { /* transient */ }
@@ -212,7 +217,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
     poll();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectId, regenPollNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 最终 UI 只从 frameRegenStore 派生，不再混入 promptTaskStore ──
   const promptingSlots: Record<number, boolean> = {};
@@ -257,7 +262,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       if (idx >= 0 && idx < 6) {
         const existing = cur[idx];
         // 锁定：服务端 job 已提交完整结果（有 generationId + url + description），跳过旧任务的覆盖
-        if (existing?.generationId && existing?.url && existing?.description) continue;
+        if (isLockedGeneratedFrame(existing)) continue;
         cur[idx] = {
           ...existing,
           url,
@@ -270,7 +275,13 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     onUpdate(cur);
   }, [completedImages, onUpdate]);
 
-  useEffect(() => { onGeneratingChange?.(Object.values(generatingSlots).some(Boolean)); }, [generatingSlots, onGeneratingChange]);
+  useEffect(() => {
+    const isAnyImageGeneratingNow = Object.values(generatingSlots).some(Boolean);
+    const isAnyServerRegenActiveNow = Object.values(regenJobs).some(
+      (job: any) => job.status !== 'completed' && job.status !== 'failed',
+    );
+    onGeneratingChange?.(isAnyImageGeneratingNow || isAnyServerRegenActiveNow);
+  }, [generatingSlots, regenJobs, onGeneratingChange]);
 
   const commitDescriptions = useCallback((updater: (imgs: StoryboardImage[]) => StoryboardImage[]) => {
     const latest = normalizeImages(imagesRef.current, projectId);
@@ -317,8 +328,12 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           const description = f.description || f.sceneTitle;
           n[i] = {
             ...n[i],
-            description: forceOverwrite ? description : (n[i]?.description || description),
-            prompt: buildBoundStoryboardPrompt(f.visualPrompt, description),
+            description: isLockedGeneratedFrame(n[i])
+              ? n[i].description
+              : (forceOverwrite ? description : (n[i]?.description || description)),
+            prompt: isLockedGeneratedFrame(n[i])
+              ? n[i].prompt
+              : buildBoundStoryboardPrompt(f.visualPrompt, description),
           };
         });
         return n;
@@ -394,6 +409,8 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       if (data.job?.status === 'completed') {
         syncFromStore();
         onGenerated?.();
+      } else {
+        setRegenPollNonce(n => n + 1);
       }
       // 否则等轮询
     } catch (e: any) {
@@ -421,16 +438,25 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
       syncFromStore();
       if (result.imageUrl) {
         const n = normalizeImages(imagesRef.current, projectId);
-        n[idx] = { ...n[idx], url: result.imageUrl, description: n[idx]?.description || desc };
-        imagesRef.current = n;
-        onUpdate(n);
+        if (!isLockedGeneratedFrame(n[idx])) {
+          n[idx] = { ...n[idx], url: result.imageUrl, description: n[idx]?.description || desc };
+          imagesRef.current = n;
+          onUpdate(n);
+        }
       }
     } catch (e: any) {
       setLastError(e.message || '生成失败，请重试');
     }
   };
 
-  const handleDesc = (idx: number, val: string) => { commitDescriptions(latest => { const n = normalizeImages(latest, projectId); n[idx] = { ...n[idx], description: val }; return n; }); };
+  const handleDesc = (idx: number, val: string) => {
+    commitDescriptions(latest => {
+      const n = normalizeImages(latest, projectId);
+      if (isLockedGeneratedFrame(n[idx])) return n;
+      n[idx] = { ...n[idx], description: val };
+      return n;
+    });
+  };
 
   const generateAll = async () => {
     const targets = Array.from({ length: 6 }, (_, i) => i).filter(i => !imagesRef.current[i]?.url && !generatingSlots[i]);
@@ -466,9 +492,11 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   });
   const currentImages = displayImages;
   const hasAnyImage = currentImages.some(img => img.url);
-  const isAnyGenerating = Object.values(generatingSlots).some(Boolean);
+  const isAnyImageGenerating = Object.values(generatingSlots).some(Boolean);
+  const isAnyServerRegenActive = Object.values(regenJobs).some((job: any) => job.status !== 'completed' && job.status !== 'failed');
+  const isAnyGenerating = isAnyImageGenerating || isAnyServerRegenActive;
   const emptySlotCount = currentImages.filter(img => !img.url).length;
-  const generatingCount = Object.values(generatingSlots).filter(Boolean).length;
+  const generatingCount = Object.values(generatingSlots).filter(Boolean).length + Object.values(regenJobs).filter((job: any) => job.status === 'generating_image').length;
 
   return (
     <div className={`${stepSubCardClass} p-6 sm:p-8`}>
@@ -628,9 +656,9 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                 <div className="flex items-center gap-2">
                   <span className={`flex h-5 w-5 items-center justify-center rounded-md ${col.dot} text-[10px] font-bold`}>{idx + 1}</span>
                   <span className="text-[13px] font-bold text-slate-700 truncate">{SCENE_LABELS[idx]}</span>
-                  {hasImg && !isGen && (
+                  {hasImg && !isGen && !promptingSlots[idx] && (
                     <button onClick={() => regenerateFrameAndImage(idx)}
-                      disabled={!!promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image'}
+                      disabled={!!promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image' || isLockedGeneratedFrame(img)}
                       className="ml-auto inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 outline-none transition-all hover:bg-white hover:border-slate-300 hover:text-slate-700 active:scale-[0.96] disabled:opacity-50"
                       title="重新生成此分镜（先刷新故事描述，再生成图片）">
                       {promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image' ? (
@@ -647,7 +675,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
                   onChange={e => handleDesc(idx, e.target.value)}
                   className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12px] leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-500 focus:border-slate-300 focus:bg-slate-100 focus:ring-2 focus:ring-slate-200 h-16"
                   placeholder={defaultPanelDescriptions[idx]}
-                  disabled={!!promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image'}
+                  disabled={!!promptingSlots[idx] || regenJobs[idx]?.status === 'generating_image' || isLockedGeneratedFrame(img)}
                 />
               </div>
             </div>

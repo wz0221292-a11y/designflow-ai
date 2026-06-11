@@ -2,7 +2,7 @@
 
 > AI 产品设计流程引擎：从创意到设计方案书，7 步生成完整工业设计文档，支持导出 PPT 和 PDF。
 
-**线上版**：[www.design-flow-ai.cloud](https://www.design-flow-ai.cloud) **当前版本**：v3.3.0
+**线上版**：[www.design-flow-ai.cloud](https://www.design-flow-ai.cloud) **当前版本**：v3.3.1
 
 ---
 
@@ -175,7 +175,8 @@ npm run dev
 **交互逻辑**：
 - 首次进入自动调用 DeepSeek 生成全部 6 帧分镜描述和视觉提示词
 - 空卡片点「生成分镜」直接用已有提示词生成图片
-- 已有图片的卡片点「**重想故事再生图**」：先调用 AI 重新生成该帧的中文描述和英文视觉提示词，更新到卡片 textarea 和 prompt 字段，再用新提示词生成对应图片
+- 已有图片的卡片点「**重想故事再生图**」：创建服务端 `frame_regeneration_jobs` 任务并立即返回；前端立刻进入「重整故事」镜像状态，服务端完成新描述和新 prompt 后再进入真实 `generating_image` 生图状态，最终将新文字 + 新图片 + `generationId` 一次性写回故事板槽位
+- 重生成期间隐藏 textarea 旧内容，完成后新文字和新图片一起出现；已生成的图文槽位带 `generationId` 锁，防止旧任务或普通补图结果覆盖
 - 顶部「一键生成全部」/「补全 N 个」
 
 ### 步骤 7：爆炸图（ExplodedViewStep）
@@ -314,7 +315,8 @@ POST /api/image → gpt-image-2
 1. AI 首先生成 `description`（画面叙事）和 `visualPrompt`（视觉指令）
 2. `buildBoundStoryboardPrompt` 把 `description` 前置为 `CRITICAL: The image must faithfully visualize this scene`
 3. 要求图片模型忠实呈现中文描述里的画面核心，不允许遗漏或替换关键元素
-4. 用户手动编辑 textarea 后，普通保存走 2 秒防抖；点「重想故事再生图」会先生成并原子保存新的 `description + prompt`，再使用新 prompt 生成图片
+4. 用户手动编辑 textarea 后，普通保存走 2 秒防抖；点「重想故事再生图」会创建服务端重生成 job，job 按 `generating_prompt → generating_image → completed` 推进，并在完成前隐藏旧文字
+5. 服务端提交时重新读取最新 `storyboard_images`，只替换当前槽位，并带上 `generationId` 锁；完成后前端刷新项目，新文字和新图片一起显示
 
 ### 分镜卡片布局
 
@@ -345,11 +347,11 @@ POST /api/image → gpt-image-2
 故事板的文字（中文描述 + 英文 prompt）最容易因生成流程复杂而丢失，额外保护：
 
 - AI 生成 6 帧描述后立即 `flushPendingSave` 写库
-- 单卡「重想故事再生图」通过 `/api/projects/:id/image-slot` 原子保存当前槽位的 `url + description + prompt + storagePath`
-- 生图完成后再次用同一槽位接口合并图片 URL 和 `storagePath`，避免 `/api/image` 或静默刷新把旧 DB 文案覆盖回来
+- 单卡「重想故事再生图」通过 `/api/frame-regeneration` 创建服务端 job，前端 localStorage 只作为镜像恢复状态，刷新/切页后继续轮询服务端真相
+- 服务端 job 先生成 `description + prompt`，再进入 `generating_image` 调用图片生成；`generating_image` 状态只在真实生图开始后写入
 - `src/lib/storyboard.ts` 统一维护 `normalizeStoryboardImages` / `mergeStoryboardSlot`，前后端共享同一 JSONB 槽位合并规则
-- `completedImages` 合并完成图时严格保留已有 `description` 和 `prompt`，不覆盖
-- 用户手动编辑 textarea 走正常 2 秒防抖自动保存
+- `completedImages` 合并完成图时严格保留已有 `description` 和 `prompt`，有 `generationId + url + description` 的槽位不接受旧任务覆盖
+- 用户手动编辑 textarea 走正常 2 秒防抖自动保存；已锁定的生成槽位不会被普通输入或旧 prompt 批量生成覆盖
 
 ---
 
