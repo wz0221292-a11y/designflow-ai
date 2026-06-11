@@ -244,6 +244,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
 
   // 已完成图片 → 立即合并到本地 images（防无限循环：按内容比较而非引用）
   // 严格保留已有 description 和 prompt，不覆盖用户编辑或 AI 生成的文字
+  // 🔒 已生成锁：已有 generationId + url + description 的帧不接受无版本覆盖
   useEffect(() => {
     const urls = Object.entries(completedImages);
     if (urls.length === 0) return;
@@ -254,11 +255,14 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     for (const [idxStr, url] of urls) {
       const idx = Number(idxStr);
       if (idx >= 0 && idx < 6) {
+        const existing = cur[idx];
+        // 锁定：服务端 job 已提交完整结果（有 generationId + url + description），跳过旧任务的覆盖
+        if (existing?.generationId && existing?.url && existing?.description) continue;
         cur[idx] = {
-          ...cur[idx],
+          ...existing,
           url,
-          description: cur[idx]?.description || '',
-          prompt: cur[idx]?.prompt || '',
+          description: existing?.description || '',
+          prompt: existing?.prompt || '',
         };
       }
     }
