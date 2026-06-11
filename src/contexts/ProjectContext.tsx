@@ -4,7 +4,7 @@ import { createContext, useContext, useReducer, useCallback, useEffect, ReactNod
 import { supabase } from '@/lib/supabase/client';
 import type { AppearanceImage, Project, ProjectState, ProjectAction } from '@/types';
 import { normalizeStoryboardImages } from '@/lib/storyboard';
-import { normalizeAppearanceImages, normalizeExplodedViewImage, assertProjectBoundData } from '@/lib/normalize';
+import { normalizeAppearanceImages, normalizeExplodedViewImage, assertProjectBoundData, hasImageRef } from '@/lib/normalize';
 
 const initialState: ProjectState = {
   project: null,
@@ -88,7 +88,7 @@ function hasStepContent(project: Project | null, step: number) {
     case 4:
       return Boolean(project.cmf);
     case 5:
-      return (project.storyboard_images?.filter((image) => image?.url).length || 0) >= 6;
+      return (project.storyboard_images?.filter((image) => hasImageRef(image)).length || 0) >= 6;
     case 6:
       return Boolean(project.exploded_view_image);
     default:

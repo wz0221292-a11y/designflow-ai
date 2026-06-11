@@ -1,5 +1,6 @@
 import PptxGenJS from 'pptxgenjs';
 import type { Database } from '@/types/database';
+import { hasImageRef, getRenderableImageUrl } from '@/lib/normalize';
 
 type ProjectRow = import('@/types').Project;
 
@@ -278,10 +279,10 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
   const intro = project.product_intro as any;
   const personas = ((project.personas as any[]) || []).filter(Boolean);
   const cmf = project.cmf as any;
-  const appearanceImages = ((project.appearance_images as any[]) || []).filter((i: any) => i?.url);
-  const storyboardImages = ((project.storyboard_images as any[]) || []).filter((i: any) => i?.url);
+  const appearanceImages = ((project.appearance_images as any[]) || []).filter((i: any) => hasImageRef(i));
+  const storyboardImages = ((project.storyboard_images as any[]) || []).filter((i: any) => hasImageRef(i));
 
-  const appearanceUrls: string[] = appearanceImages.map((i: any) => i.url || i).filter(Boolean);
+  const appearanceUrls: string[] = appearanceImages.map((i: any) => getRenderableImageUrl(i)).filter(Boolean);
 
   const include = includeSections || {
     background: true, product_intro: true, personas: true,
@@ -296,8 +297,8 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
 
   const urlsToFetch = [
     ...appearanceUrls,
-    ...storyboardImages.map((img: any) => img.url),
-    project.exploded_view_image?.url || '',
+    ...storyboardImages.map((img: any) => getRenderableImageUrl(img)),
+    getRenderableImageUrl(project.exploded_view_image),
   ].filter((u): u is string => Boolean(u));
 
   await Promise.all(
@@ -409,7 +410,7 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
       ['04', '外观设计', include.appearance && appearanceImages.length > 0],
       ['05', 'CMF 方案', include.cmf && Boolean(cmf)],
       ['06', '故事板', include.storyboard && storyboardImages.length > 0],
-      ['07', '爆炸图', include.exploded_view && Boolean(project.exploded_view_image?.url)],
+      ['07', '爆炸图', include.exploded_view && hasImageRef(project.exploded_view_image)],
     ].filter(([, , ok]) => ok);
 
     secs.forEach(([num, name], i) => {
@@ -662,7 +663,7 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
       const x = MARGIN + col * (colW + gap);
       const y = CONTENT_TOP + 0.75 + row * (imgH + 0.55);
 
-      addImageSafe(slide, getImg(img.url), x, y, colW, imgH);
+      addImageSafe(slide, getImg(getRenderableImageUrl(img)), x, y, colW, imgH);
       (slide as any).addText(t(img.description), {
         x, y: y + imgH + 0.04, w: colW, h: 0.38,
         fontSize: 7, fontFace: FONT, color: MUTED,
@@ -674,11 +675,11 @@ export async function generatePPT(project: ProjectRow, includeSections?: Record<
   // ═══════════════════════════════════════════════════════════
   // 7. EXPLODED VIEW
   // ═══════════════════════════════════════════════════════════
-  if (include.exploded_view && project.exploded_view_image?.url) {
+  if (include.exploded_view && hasImageRef(project.exploded_view_image)) {
     const slide = pptx.addSlide();
     addSectionTitle(slide, '爆炸图', '产品结构分解视图');
     addFooter(slide, pageNum++);
-    addImageSafe(slide, getImg(project.exploded_view_image?.url || ''), MARGIN, CONTENT_TOP + 0.8, CW, CONTENT_BOT - CONTENT_TOP - 0.9);
+    addImageSafe(slide, getImg(getRenderableImageUrl(project.exploded_view_image)), MARGIN, CONTENT_TOP + 0.8, CW, CONTENT_BOT - CONTENT_TOP - 0.9);
   }
 
   const output = await pptx.write({ outputType: 'arraybuffer' }) as ArrayBuffer;

@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
 import { resolveImageUrl } from '@/lib/image/urlResolver';
 import { normalizeStoryboardImages, safeFrameForProject } from '@/lib/storyboard';
-import { getImageDisplayUrl } from '@/lib/normalize';
+import { getImageDisplayUrl, hasImageRef, isTemporaryImageRef } from '@/lib/normalize';
 import {
   initializeFrameRegenStore,
   subscribeFrameRegen,
@@ -460,7 +460,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
   };
 
   const generateAll = async () => {
-    const targets = Array.from({ length: 6 }, (_, i) => i).filter(i => !imagesRef.current[i]?.url && !generatingSlots[i]);
+    const targets = Array.from({ length: 6 }, (_, i) => i).filter(i => !hasImageRef(imagesRef.current[i]) && !generatingSlots[i]);
     if (!targets.length) return;
     await Promise.all(targets.map(i => generateImage(i)));
   };
@@ -492,11 +492,11 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
     return base;
   });
   const currentImages = displayImages;
-  const hasAnyImage = currentImages.some(img => img.url);
+  const hasAnyImage = currentImages.some(img => hasImageRef(img));
   const isAnyImageGenerating = Object.values(generatingSlots).some(Boolean);
   const isAnyServerRegenActive = Object.values(regenJobs).some((job: any) => job.status !== 'completed' && job.status !== 'failed');
   const isAnyGenerating = isAnyImageGenerating || isAnyServerRegenActive;
-  const emptySlotCount = currentImages.filter(img => !img.url).length;
+  const emptySlotCount = currentImages.filter(img => !hasImageRef(img)).length;
   const generatingCount = Object.values(generatingSlots).filter(Boolean).length + Object.values(regenJobs).filter((job: any) => job.status === 'generating_image').length;
 
   return (
@@ -559,7 +559,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
         {displayImages.map((img, idx) => {
           const serverGen = regenJobs[idx]?.status === 'generating_image';
           const isGen = generatingSlots[idx] || serverGen;
-          const hasImg = Boolean(img.url);
+          const hasImg = hasImageRef(img);
           const col = SCENE_COLORS[idx];
 
           return (

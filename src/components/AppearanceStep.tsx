@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { AppearanceImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
-import { safeAppearanceForProject, getImageDisplayUrl } from '@/lib/normalize';
+import { safeAppearanceForProject, getImageDisplayUrl, hasImageRef } from '@/lib/normalize';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface AppearanceStepProps {
@@ -139,7 +139,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
     );
   }
 
-  const allGenerated = currentImages.every(img => img?.url);
+  const allGenerated = currentImages.every(img => hasImageRef(img));
   const isAnyGenerating = Object.values(generatingSlots).some(Boolean);
 
   return (
@@ -218,7 +218,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
               {/* Card header */}
               <div className="flex items-center justify-between border-b border-slate-200/80 px-4 py-3">
                 <div className="flex items-center gap-2">
-                  <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${isThisSlotGenerating ? 'bg-cyan-100 text-cyan-600' : img?.url ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>
+                  <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${isThisSlotGenerating ? 'bg-cyan-100 text-cyan-600' : hasImageRef(img) ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500'}`}>
                     {index + 1}
                   </span>
                   <span className={`text-sm font-bold ${isThisSlotGenerating ? 'text-cyan-600' : 'text-slate-700'}`}>效果图 {index + 1}</span>
@@ -236,7 +236,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
               </div>
 
               {/* Image area */}
-              {img?.url ? (
+              {hasImageRef(img) ? (
                 <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => !isThisSlotGenerating && setPreviewImage(getImageDisplayUrl(img) || img.url)}>
                   <img src={getImageDisplayUrl(img) || img.url} alt={`外观设计 ${index + 1}`} className={`h-full w-full object-cover transition duration-500 ${isThisSlotGenerating ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`} />
                   {/* 生成中遮罩 */}
@@ -298,7 +298,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
 
               {/* Card footer */}
               <div className="flex items-center gap-2 border-t border-slate-200/80 px-4 py-3">
-                {img?.url ? (
+                {hasImageRef(img) ? (
                   <>
                     <button onClick={() => handleSelect(index)} disabled={selectedImageIndex !== null || isAnyGenerating}
                       className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-2.5 text-sm font-bold transition-all ${
@@ -334,7 +334,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
       {/* Generate all CTA */}
       {!allGenerated && !isAnyGenerating && selectedImageIndex === null && (
         <div className="mt-8 flex justify-center">
-          <button onClick={() => { imagesRef.current.forEach((img, index) => { if (!img?.url && !generatingSlots[index]) generateImage(index); }); }}
+          <button onClick={() => { imagesRef.current.forEach((img, index) => { if (!hasImageRef(img) && !generatingSlots[index]) generateImage(index); }); }}
             className="inline-flex items-center gap-2.5 rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 px-8 py-3.5 text-sm font-black text-white shadow-xl shadow-cyan-500/25 outline-none transition hover:-translate-y-0.5 hover:shadow-2xl hover:shadow-cyan-500/30 active:translate-y-0">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             一键生成全部效果图

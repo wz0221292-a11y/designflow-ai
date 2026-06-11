@@ -302,3 +302,53 @@ export function getImageDisplayUrl(image: { url?: string | null; storagePath?: s
 
   return '';
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 统一图片引用解析层 —— 所有"图片是否存在 / 取展示 URL"的唯一入口
+// ═══════════════════════════════════════════════════════════════
+
+export interface ImageRef {
+  storagePath: string | null;
+  url: string;
+}
+
+/**
+ * 从任意图片对象中提取统一引用。
+ * 兼容不同字段名：url / imageUrl, storagePath / imageStoragePath
+ */
+export function getImageRef(image: any): ImageRef {
+  if (!image || typeof image !== 'object') return { storagePath: null, url: '' };
+  return {
+    storagePath: image.storagePath ?? image.imageStoragePath ?? null,
+    url: image.url ?? image.imageUrl ?? (typeof image === 'string' ? image : ''),
+  };
+}
+
+/**
+ * 判断图片是否有可渲染内容。
+ * 规则：有 storagePath → 一定有图片；有 url 但不是临时链接 → 有图片。
+ * 绝对不能只检查 url，因为保存归一化后 url 会被清空。
+ */
+export function hasImageRef(image: any): boolean {
+  const ref = getImageRef(image);
+  if (typeof ref.storagePath === 'string' && ref.storagePath) return true;
+  if (ref.url && !isTemporaryImageUrl(ref.url)) return true;
+  return false;
+}
+
+/**
+ * 判断图片引用是否为临时第三方链接（需修复）。
+ */
+export function isTemporaryImageRef(image: any): boolean {
+  const ref = getImageRef(image);
+  return !ref.storagePath && isTemporaryImageUrl(ref.url);
+}
+
+/**
+ * 获取图片的最终渲染 URL。
+ * 优先从 storagePath 生成 Supabase URL，否则退回 url 字段。
+ * 与 getImageDisplayUrl 等价，但入参更宽泛。
+ */
+export function getRenderableImageUrl(image: any): string {
+  return getImageDisplayUrl(getImageRef(image));
+}

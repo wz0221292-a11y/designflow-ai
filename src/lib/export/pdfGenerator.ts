@@ -3,6 +3,7 @@ import { join } from 'path';
 import pdfMake from 'pdfmake/build/pdfmake';
 import type { Content, TDocumentDefinitions } from 'pdfmake/build/pdfmake';
 import type { Database } from '@/types/database';
+import { hasImageRef, getRenderableImageUrl } from '@/lib/normalize';
 
 // ── Image safety ─────────────────────────────────────────────────
 
@@ -340,7 +341,7 @@ function storyboardGrid(images: any[]): Content {
     const cols = row.map((img) => ({
       width: '*',
       stack: [
-        { image: img.url, width: imgW, height: imgW * 0.58, fit: [imgW, imgW * 0.58] },
+        { image: getRenderableImageUrl(img), width: imgW, height: imgW * 0.58, fit: [imgW, imgW * 0.58] },
         { text: t(img.description), style: 'caption', alignment: 'center', margin: [0, 3, 0, 0] },
       ],
     }));
@@ -484,10 +485,10 @@ export async function generatePDF(
   const intro = project.product_intro as any;
   const personas = ((project.personas as any[]) || []).filter(Boolean);
   const cmf = project.cmf as any;
-  const appearanceImages = ((project.appearance_images as any[]) || []).filter((i: any) => i?.url);
-  const storyboardImages = ((project.storyboard_images as any[]) || []).filter((i: any) => i?.url);
+  const appearanceImages = ((project.appearance_images as any[]) || []).filter((i: any) => hasImageRef(i));
+  const storyboardImages = ((project.storyboard_images as any[]) || []).filter((i: any) => hasImageRef(i));
 
-  const appearanceUrls: string[] = appearanceImages.map((i: any) => i.url || i).filter(Boolean);
+  const appearanceUrls: string[] = appearanceImages.map((i: any) => getRenderableImageUrl(i)).filter(Boolean);
   const title = t(intro?.name) || t(project.idea) || '设计方案';
   const tagline = t(intro?.tagline) || 'AI 产品设计方案';
 
@@ -509,7 +510,7 @@ export async function generatePDF(
   if (include.appearance && appearanceImages.length) sections.push({ num: '04', name: '外观设计' });
   if (include.cmf && cmf) sections.push({ num: '05', name: 'CMF 方案' });
   if (include.storyboard && storyboardImages.length) sections.push({ num: '06', name: '故事板' });
-  if (include.exploded_view && project.exploded_view_image?.url) sections.push({ num: '07', name: '爆炸图' });
+  if (include.exploded_view && hasImageRef(project.exploded_view_image)) sections.push({ num: '07', name: '爆炸图' });
 
   const content: Content = [
     buildCover(title, tagline),
@@ -590,11 +591,11 @@ export async function generatePDF(
   }
 
   // 7. Exploded view
-  if (include.exploded_view && project.exploded_view_image?.url) {
+  if (include.exploded_view && hasImageRef(project.exploded_view_image)) {
     content.push({
       stack: [
         ...sectionBlock('爆炸图', '产品结构分解视图'),
-        heroImage(project.exploded_view_image?.url || ''),
+        heroImage(getRenderableImageUrl(project.exploded_view_image)),
       ],
       pageBreak: 'before',
     });
@@ -658,8 +659,8 @@ export async function generatePDF(
 
   const urlsToFetch = [
     ...appearanceUrls,
-    ...storyboardImages.map((img: any) => img.url),
-    project.exploded_view_image?.url || '',
+    ...storyboardImages.map((img: any) => getRenderableImageUrl(img)),
+    getRenderableImageUrl(project.exploded_view_image),
   ].filter((u): u is string => Boolean(u));
 
   await Promise.all(

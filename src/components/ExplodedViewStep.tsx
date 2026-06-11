@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import type { ExplodedViewImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
-import { safeExplodedViewForProject, getImageDisplayUrl } from '@/lib/normalize';
+import { safeExplodedViewForProject, getImageDisplayUrl, hasImageRef } from '@/lib/normalize';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface ExplodedViewStepProps {
@@ -110,7 +110,7 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
           <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" /></svg>
         }
         action={
-          safeImage?.url ? (
+          hasImageRef(safeImage) ? (
             <button onClick={generateImage} disabled={isGenerating} className={stepSecondaryButtonClass}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
               {isGenerating ? '重新生成中…' : '重新生成'}
@@ -142,9 +142,9 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Image area */}
         <div className="lg:col-span-3">
-          {safeImage?.url ? (
+          {hasImageRef(safeImage) ? (
             <div className="group relative overflow-hidden rounded-[1.75rem] border bg-white shadow-lg shadow-rose-100/20">
-              <img src={getImageDisplayUrl(safeImage) || safeImage.url} alt="爆炸图" className={`w-full object-cover transition duration-500 ${isGenerating ? 'blur-[2px] scale-105' : ''}`} />
+              <img src={getImageDisplayUrl(safeImage) || safeImage?.url || ''} alt="爆炸图" className={`w-full object-cover transition duration-500 ${isGenerating ? 'blur-[2px] scale-105' : ''}`} />
               {/* 生成中遮罩 */}
               {isGenerating && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-rose-500/20 via-rose-400/10 to-orange-500/20 backdrop-blur-[1px]">
