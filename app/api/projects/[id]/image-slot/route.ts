@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/auth/admin';
 import { mergeStoryboardSlot } from '@/lib/storyboard';
+import { isTemporaryImageUrl } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
 
@@ -55,6 +56,18 @@ export async function PATCH(
       return NextResponse.json({ error: '缺少 url 参数' }, { status: 400 });
     }
 
+    // 硬拦截：拒绝临时 URL（65535.space）写入数据库。必须有 storagePath 才能写。
+    const hasStoragePath = typeof body.storagePath === 'string' && body.storagePath;
+    if (url && isTemporaryImageUrl(url) && !hasStoragePath) {
+      return NextResponse.json(
+        { error: 'Temporary image URL requires storagePath. Image must be persisted before saving.' },
+        { status: 400 },
+      );
+    }
+
+    // 归一化：有 storagePath 时清空 url 字段（前端展示时从 storagePath 动态重建）
+    const normalizedUrl = hasStoragePath ? '' : url;
+
     // 验证项目归属
     const { data: project, error: projectError } = await supabase
       .from('projects')
@@ -81,7 +94,7 @@ export async function PATCH(
         projectId,
         stepKey: 'exploded_view',
         slotIndex: 0,
-        url,
+        url: normalizedUrl,
         storagePath: typeof body.storagePath === 'string' ? body.storagePath : (prev.storagePath || null),
         generationId: generationId || prev.generationId || undefined,
       };
@@ -122,7 +135,7 @@ export async function PATCH(
         projectId,
         stepKey: 'storyboard',
         slotIndex: index,
-        url,
+        url: normalizedUrl,
         description: typeof body.description === 'string' ? body.description : undefined,
         prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
         storagePath: typeof body.storagePath === 'string' ? body.storagePath : undefined,
@@ -137,7 +150,7 @@ export async function PATCH(
         projectId,
         stepKey: 'appearance',
         slotIndex: index,
-        url,
+        url: normalizedUrl,
         storagePath: typeof body.storagePath === 'string' ? body.storagePath : (prev.storagePath || null),
         generationId: generationId || prev.generationId || undefined,
       };

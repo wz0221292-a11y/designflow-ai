@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import type { ExplodedViewImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
-import { safeExplodedViewForProject } from '@/lib/normalize';
+import { safeExplodedViewForProject, getImageDisplayUrl } from '@/lib/normalize';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface ExplodedViewStepProps {
@@ -144,7 +144,7 @@ export default function ExplodedViewStep({ image, isLoading, idea, projectId, re
         <div className="lg:col-span-3">
           {safeImage?.url ? (
             <div className="group relative overflow-hidden rounded-[1.75rem] border bg-white shadow-lg shadow-rose-100/20">
-              <img src={safeImage.url} alt="爆炸图" className={`w-full object-cover transition duration-500 ${isGenerating ? 'blur-[2px] scale-105' : ''}`} />
+              <img src={getImageDisplayUrl(safeImage) || safeImage.url} alt="爆炸图" className={`w-full object-cover transition duration-500 ${isGenerating ? 'blur-[2px] scale-105' : ''}`} />
               {/* 生成中遮罩 */}
               {isGenerating && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-rose-500/20 via-rose-400/10 to-orange-500/20 backdrop-blur-[1px]">

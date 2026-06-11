@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
 import { resolveImageUrl } from '@/lib/image/urlResolver';
 import { normalizeStoryboardImages, safeFrameForProject } from '@/lib/storyboard';
+import { getImageDisplayUrl } from '@/lib/normalize';
 import {
   initializeFrameRegenStore,
   subscribeFrameRegen,
@@ -576,7 +577,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
               {/* Image */}
               {hasImg ? (
                 <div className="relative aspect-video cursor-pointer overflow-hidden bg-slate-100" onClick={() => !isGen && !promptingSlots[idx] && setPreviewImage(img.url)}>
-                  <img src={img.url} alt={SCENE_LABELS[idx]} className={`h-full w-full object-cover transition duration-500 ${isGen || promptingSlots[idx] ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`}
+                  <img src={getImageDisplayUrl(img) || img.url} alt={SCENE_LABELS[idx]} className={`h-full w-full object-cover transition duration-500 ${isGen || promptingSlots[idx] ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`}
                     onError={(e) => {
                       const { url } = resolveImageUrl(null, img.storagePath || null);
                       if (url && url !== (e.target as HTMLImageElement).src) {
@@ -700,7 +701,7 @@ export default function StoryboardStep({ images, isLoading, idea, projectId, ref
           <button className="absolute top-5 right-5 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white/80 transition hover:bg-white/20" onClick={() => setPreviewImage(null)}>
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
-          <img src={previewImage} alt="预览" className="max-h-[90vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl" onClick={e => e.stopPropagation()} />
+          <img src={getImageDisplayUrl({ url: previewImage }) || previewImage} alt="预览" className="max-h-[90vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl" onClick={e => e.stopPropagation()} />
         </div>
       )}
     </div>

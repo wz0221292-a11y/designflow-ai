@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/auth/admin';
+import { containsTemporaryImageUrl, normalizeProjectImagesBeforeSave } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
 
@@ -140,9 +141,20 @@ export async function PUT(
       updates.current_step = Math.max(0, Math.min(7, Math.trunc(updates.current_step)));
     }
 
+    // 硬拦截：禁止临时 URL（65535.space）进入数据库主数据
+    if (containsTemporaryImageUrl(updates)) {
+      return NextResponse.json(
+        { error: 'Temporary image URL is not allowed. Images must be persisted to storage before saving.' },
+        { status: 400 },
+      );
+    }
+
+    // 归一化图片字段：有 storagePath 的清空 url，只以 storagePath 为真相
+    const safeUpdates = normalizeProjectImagesBeforeSave(updates);
+
     const { data, error } = await supabase
       .from('projects')
-      .update(updates)
+      .update(safeUpdates)
       .eq('id', id)
       .eq('user_id', user.id)
       .select()

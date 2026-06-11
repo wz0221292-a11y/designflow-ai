@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { AppearanceImage } from '@/types';
 import { supabase } from '@/lib/supabase/client';
 import { useImageTaskStore } from '@/lib/useImageTaskStore';
-import { safeAppearanceForProject } from '@/lib/normalize';
+import { safeAppearanceForProject, getImageDisplayUrl } from '@/lib/normalize';
 import StepHeader, { stepPrimaryButtonClass, stepSecondaryButtonClass, stepSubCardClass } from './StepHeader';
 
 interface AppearanceStepProps {
@@ -237,8 +237,8 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
 
               {/* Image area */}
               {img?.url ? (
-                <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => !isThisSlotGenerating && setPreviewImage(img.url)}>
-                  <img src={img.url} alt={`外观设计 ${index + 1}`} className={`h-full w-full object-cover transition duration-500 ${isThisSlotGenerating ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`} />
+                <div className="relative aspect-square cursor-zoom-in bg-white overflow-hidden" onClick={() => !isThisSlotGenerating && setPreviewImage(getImageDisplayUrl(img) || img.url)}>
+                  <img src={getImageDisplayUrl(img) || img.url} alt={`外观设计 ${index + 1}`} className={`h-full w-full object-cover transition duration-500 ${isThisSlotGenerating ? 'blur-[2px] scale-105' : 'group-hover:scale-105'}`} />
                   {/* 生成中遮罩 */}
                   {isThisSlotGenerating && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-cyan-500/20 via-cyan-400/10 to-blue-500/20 backdrop-blur-[1px]">
@@ -348,7 +348,7 @@ export default function AppearanceStep({ images, isLoading, idea, projectId, onU
           <button className="absolute top-5 right-5 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white/80 transition hover:bg-white/20" onClick={() => setPreviewImage(null)}>
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
-          <img src={previewImage} alt="预览" className="max-h-[90vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl" onClick={(e) => e.stopPropagation()} />
+          <img src={getImageDisplayUrl({ url: previewImage }) || previewImage} alt="预览" className="max-h-[90vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl" onClick={(e) => e.stopPropagation()} />
         </div>
       )}
 

@@ -5,6 +5,8 @@
  * 1. 所有项目内资源在进入 state 前必须经过 normalize，注入 projectId/stepKey/slotIndex
  * 2. 所有 UI 渲染前必须通过 safe* 守卫过滤
  * 3. 所有保存入口必须通过 assertProjectBoundData 校验
+ * 4. 所有保存入口必须先 normalizeProjectImagesBeforeSave 再落库
+ * 5. 临时 URL（65535.space）禁止进入数据库主数据
  */
 import type { AppearanceImage, ExplodedViewImage, StoryboardImage } from '@/types';
 
@@ -190,4 +192,113 @@ export function assertProjectBoundData(
       );
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 临时 URL 检测 —— 核心防线：禁止 65535.space 临时链接进入主数据
+// ═══════════════════════════════════════════════════════════════
+
+const TEMPORARY_URL_PATTERN = /image\.65535\.space\/jobs\//;
+
+export function isTemporaryImageUrl(url: unknown): boolean {
+  return typeof url === 'string' && TEMPORARY_URL_PATTERN.test(url);
+}
+
+/**
+ * 深度检测 JSON 数据中是否包含临时 URL。
+ * 用于保存前硬拦截——只要有一条临时链接，整次保存就拒绝。
+ */
+export function containsTemporaryImageUrl(data: unknown): boolean {
+  return TEMPORARY_URL_PATTERN.test(JSON.stringify(data));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 保存前归一化 —— 确保数据库主字段只存 storagePath，不存临时 URL
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * 归一化单个图片记录：
+ * - 有 storagePath → url 清空（前端展示时从 storagePath 重建）
+ * - 无 storagePath 但 url 是临时链接 → 抛出错误
+ * - 无 storagePath 但 url 是稳定链接 → 保留
+ */
+function normalizeImageRecord(image: Record<string, unknown> | null | undefined): Record<string, unknown> | null | undefined {
+  if (!image) return image;
+
+  const storagePath = typeof image.storagePath === 'string' && image.storagePath ? image.storagePath : null;
+  const url = typeof image.url === 'string' ? image.url : '';
+
+  if (storagePath) {
+    // 有 storagePath → 以 storagePath 为唯一真相，不保存 url
+    return {
+      ...image,
+      url: '',
+    };
+  }
+
+  if (url && isTemporaryImageUrl(url)) {
+    throw new Error(
+      `Refusing to save temporary image URL: ${url.slice(0, 80)}... ` +
+      `storagePath is required before persisting to database.`
+    );
+  }
+
+  return image;
+}
+
+/**
+ * 保存前归一化整个项目的所有图片字段。
+ * 必须在 PUT /api/projects/[id] 等写 DB 的入口调用。
+ */
+export function normalizeProjectImagesBeforeSave(project: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...project };
+
+  // storyboard_images
+  if (Array.isArray(result.storyboard_images)) {
+    result.storyboard_images = (result.storyboard_images as any[]).map((img) =>
+      normalizeImageRecord(img)
+    );
+  }
+
+  // appearance_images
+  if (Array.isArray(result.appearance_images)) {
+    result.appearance_images = (result.appearance_images as any[]).map((img) =>
+      normalizeImageRecord(img)
+    );
+  }
+
+  // exploded_view_image
+  if (result.exploded_view_image && typeof result.exploded_view_image === 'object') {
+    result.exploded_view_image = normalizeImageRecord(
+      result.exploded_view_image as Record<string, unknown>
+    );
+  }
+
+  return result;
+}
+
+/**
+ * 获取图片的渲染 URL：优先从 storagePath 生成，没有则退回 url 字段。
+ * 这是所有 UI 展示图片的统一入口，不允许直接读取 image.url。
+ */
+export function getImageDisplayUrl(image: { url?: string | null; storagePath?: string | null } | null | undefined): string {
+  if (!image) return '';
+
+  // storagePath 是唯一稳定标识，优先用它生成 URL
+  if (typeof image.storagePath === 'string' && image.storagePath) {
+    // 动态生成 Supabase public URL
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    if (supabaseUrl) {
+      return `${supabaseUrl}/storage/v1/object/public/generated-images/${image.storagePath}`;
+    }
+    // fallback: 运行时拼接
+    return `/api/storage/generated-images/${image.storagePath}`;
+  }
+
+  // 回退到 url 字段（旧数据 or 第三方暂存）
+  if (typeof image.url === 'string' && image.url) {
+    return image.url;
+  }
+
+  return '';
 }

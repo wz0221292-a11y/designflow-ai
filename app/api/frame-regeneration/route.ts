@@ -151,7 +151,7 @@ async function processFrameRegeneration(jobId: string, params: {
       stepKey: 'storyboard' as const,
       slotIndex,
       generationId,
-      url: imageUrl,
+      url: '',
       storagePath,
       description,
       prompt,

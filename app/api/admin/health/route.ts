@@ -2,12 +2,31 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/auth/admin';
 import { persistGeneratedImage } from '@/lib/image/storage';
+import { isTemporaryImageUrl, getImageDisplayUrl } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
 
 const MAX_CHECK_PER_PROJECT = 30;
+const STORAGE_BUCKET = 'generated-images';
 
-async function checkUrl(url: string): Promise<'alive' | 'dead'> {
+/** 检查 storagePath 对应的文件是否真实存在于 Supabase Storage */
+async function checkStorageFile(storagePath: string): Promise<'alive' | 'dead'> {
+  try {
+    const { data, error } = await supabaseAdmin.storage
+      .from(STORAGE_BUCKET)
+      .list(storagePath.split('/').slice(0, -1).join('/'), {
+        limit: 1,
+        search: storagePath.split('/').pop(),
+      });
+    if (error) return 'dead';
+    return data && data.length > 0 ? 'alive' : 'dead';
+  } catch {
+    return 'dead';
+  }
+}
+
+/** 测试 HTTP URL 是否可访问（仅用于无 storagePath 的旧数据） */
+async function checkHttpUrl(url: string): Promise<'alive' | 'dead'> {
   try {
     const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
     return res.ok ? 'alive' : 'dead';
@@ -21,7 +40,10 @@ interface AssetInfo {
   typeLabel: string;
   slot: number;
   url: string;
-  isThirdParty: boolean;
+  displayUrl: string;
+  storagePath: string | null;
+  isSafeStorage: boolean;   // 有 storagePath → 图片已持久化到 Supabase
+  isThirdParty: boolean;     // 有 url 但无 storagePath 且 url 是临时链接
   status?: 'alive' | 'dead' | 'unchecked';
 }
 
@@ -72,54 +94,90 @@ export async function GET() {
       // appearance_images 现在是 AppearanceImage[] 对象（兼容旧 string[] 数据）
       const appImages = (p.appearance_images as any[]) || [];
       appImages.forEach((item: any, i: number) => {
-        const url = typeof item === 'string' ? item : item?.url;
-        if (url) {
+        const storagePath = typeof item?.storagePath === 'string' ? item.storagePath : null;
+        const rawUrl = typeof item === 'string' ? item : item?.url || '';
+        const displayUrl = getImageDisplayUrl(item) || rawUrl;
+        if (displayUrl || storagePath) {
           assets.push({
             type: 'appearance',
             typeLabel: '外观',
             slot: i,
-            url,
-            isThirdParty: url.includes('65535.space') && !url.includes('supabase'),
+            url: rawUrl,
+            displayUrl,
+            storagePath,
+            isSafeStorage: Boolean(storagePath),
+            isThirdParty: !storagePath && isTemporaryImageUrl(rawUrl),
           });
         }
       });
 
       ((p.storyboard_images as any[]) || []).forEach((s: any, i: number) => {
-        if (s?.url) assets.push({ type: 'storyboard', typeLabel: '故事板', slot: i, url: s.url, isThirdParty: s.url.includes('65535.space') && !s.url.includes('supabase') });
+        const storagePath = typeof s?.storagePath === 'string' ? s.storagePath : null;
+        const rawUrl = s?.url || '';
+        const displayUrl = getImageDisplayUrl(s) || rawUrl;
+        if (displayUrl || storagePath) {
+          assets.push({
+            type: 'storyboard',
+            typeLabel: '故事板',
+            slot: i,
+            url: rawUrl,
+            displayUrl,
+            storagePath,
+            isSafeStorage: Boolean(storagePath),
+            isThirdParty: !storagePath && isTemporaryImageUrl(rawUrl),
+          });
+        }
       });
 
       // exploded_view_image 现在是 ExplodedViewImage 对象（兼容旧 string 数据）
-      const explodedUrl = typeof p.exploded_view_image === 'string'
-        ? p.exploded_view_image
-        : (p.exploded_view_image as any)?.url;
-      if (explodedUrl) {
+      const explodedItem = p.exploded_view_image;
+      const explodedStoragePath = typeof explodedItem?.storagePath === 'string' ? explodedItem.storagePath : null;
+      const explodedRawUrl = typeof explodedItem === 'string'
+        ? explodedItem
+        : (explodedItem as any)?.url || '';
+      const explodedDisplayUrl = getImageDisplayUrl(explodedItem as any) || explodedRawUrl;
+      if (explodedDisplayUrl || explodedStoragePath) {
         assets.push({
           type: 'exploded_view',
           typeLabel: '爆炸图',
           slot: 0,
-          url: explodedUrl,
-          isThirdParty: explodedUrl.includes('65535.space') && !explodedUrl.includes('supabase'),
+          url: explodedRawUrl,
+          displayUrl: explodedDisplayUrl,
+          storagePath: explodedStoragePath,
+          isSafeStorage: Boolean(explodedStoragePath),
+          isThirdParty: !explodedStoragePath && isTemporaryImageUrl(explodedRawUrl),
         });
       }
 
       if (!assets.length) continue;
 
+      const safeStorageAssets = assets.filter((a) => a.isSafeStorage);
       const thirdPartyAssets = assets.filter((a) => a.isThirdParty);
-      const safeImages = assets.length - thirdPartyAssets.length;
       let checkedAlive = 0;
       let checkedDead = 0;
       let unchecked = 0;
 
-      // Check third-party URLs up to MAX_CHECK_PER_PROJECT
-      for (let i = 0; i < thirdPartyAssets.length; i++) {
-        if (i < MAX_CHECK_PER_PROJECT) {
-          const status = await checkUrl(thirdPartyAssets[i].url);
-          thirdPartyAssets[i].status = status;
+      // Check at-risk assets up to MAX_CHECK_PER_PROJECT
+      const atRisk = assets.filter((a) => !a.isSafeStorage);
+      for (let i = 0; i < atRisk.length; i++) {
+        if (i >= MAX_CHECK_PER_PROJECT) {
+          atRisk[i].status = 'unchecked';
+          unchecked++;
+          continue;
+        }
+        // storagePath 存在的 → 检查文件是否真实在 bucket 中
+        const storagePath = atRisk[i].storagePath;
+        if (storagePath) {
+          const status = await checkStorageFile(storagePath);
+          atRisk[i].status = status;
           if (status === 'alive') checkedAlive++;
           else checkedDead++;
         } else {
-          thirdPartyAssets[i].status = 'unchecked';
-          unchecked++;
+          // 无 storagePath → HTTP HEAD 检查 url
+          const status = await checkHttpUrl(atRisk[i].url);
+          atRisk[i].status = status;
+          if (status === 'alive') checkedAlive++;
+          else checkedDead++;
         }
       }
 
@@ -128,7 +186,7 @@ export async function GET() {
         projectName: name,
         userId: p.user_id,
         totalImages: assets.length,
-        safeImages,
+        safeImages: safeStorageAssets.length,
         thirdPartyImages: thirdPartyAssets.length,
         checkedAlive,
         checkedDead,
@@ -218,7 +276,7 @@ export async function POST(request: NextRequest) {
           const item = raw[i];
           const existing = typeof item === 'string' ? { url: item } : (item || {});
           images.push(i === slotIndex
-            ? { ...existing, url: saved.publicUrl, storagePath: saved.storagePath, projectId, stepKey: 'appearance', slotIndex: i }
+            ? { ...existing, url: '', storagePath: saved.storagePath, projectId, stepKey: 'appearance', slotIndex: i }
             : existing
           );
         }
@@ -226,7 +284,7 @@ export async function POST(request: NextRequest) {
       } else if (type === 'storyboard') {
         const images = ((project.storyboard_images as any[]) || []).slice(0, 6);
         while (images.length < 6) images.push({ url: '', description: '' });
-        images[slotIndex] = { ...images[slotIndex], url: saved.publicUrl, storagePath: saved.storagePath };
+        images[slotIndex] = { ...images[slotIndex], url: '', storagePath: saved.storagePath };
         await supabaseAdmin.from('projects').update({ storyboard_images: images }).eq('id', projectId);
       } else if (type === 'exploded_view') {
         const existing = (typeof project.exploded_view_image === 'string'
@@ -235,11 +293,12 @@ export async function POST(request: NextRequest) {
         await supabaseAdmin.from('projects').update({
           exploded_view_image: {
             ...existing,
-            url: saved.publicUrl,
+            url: '',
             storagePath: saved.storagePath,
             projectId,
             stepKey: 'exploded_view',
             slotIndex: 0,
+            provider: 'supabase',
           },
         }).eq('id', projectId);
       }
